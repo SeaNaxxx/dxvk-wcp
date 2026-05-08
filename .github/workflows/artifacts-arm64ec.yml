@@ -1,0 +1,214 @@
+name: Artifacts Arm64ec (Package)
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      VERSION:
+        description: Optional upstream DXVK tag override
+        required: false
+        type: string
+      LLVM_TAG:
+        description: Optional llvm-mingw tag override
+        required: false
+        type: string
+      FORCE_MODE:
+        description: Force rebuild
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -Eeuo pipefail {0}
+
+env:
+  system32: '${system32}'
+  syswow64: '${syswow64}'
+  UPSTREAM_REPO: doitsujin/dxvk
+
+jobs:
+  build-wcp-arm64ec:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq glslang-tools python3-pip zstd
+          python3 -m pip install --user meson ninja
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve version + llvm-mingw + PKG
+        env:
+          VERSION_INPUT: ${{ inputs.VERSION }}
+          LLVM_TAG_INPUT: ${{ inputs.LLVM_TAG }}
+        run: |
+          if [[ -n "$VERSION_INPUT" ]]; then
+            VER="$VERSION_INPUT"
+          else
+            VER=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" | jq -r '.tag_name // empty')
+            if [[ -z "$VER" ]]; then
+              VER=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=1" | jq -r '.[0].name // empty')
+            fi
+          fi
+          VER="${VER#v}"
+
+          if [[ -n "$LLVM_TAG_INPUT" ]]; then
+            LLVM_RELEASE=$(curl -fsSL "https://api.github.com/repos/mstorsjo/llvm-mingw/releases/tags/${LLVM_TAG_INPUT}")
+          else
+            LLVM_RELEASE=$(curl -fsSL "https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest")
+          fi
+          LLVM_TAG=$(jq -r '.tag_name' <<< "$LLVM_RELEASE")
+          ASSET_URL=$(jq -r 'first(.assets[] | select(.name | test("ucrt.*ubuntu.*x86_64\\.tar\\.xz$")) | .browser_download_url)' <<< "$LLVM_RELEASE")
+          [[ -n "$ASSET_URL" ]] || (echo "No llvm-mingw x86_64 archive found for ${LLVM_TAG}" >&2; exit 1)
+
+          COMMIT=$(git rev-parse --short=8 HEAD)
+          BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+          SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-')
+
+          if [[ "$BRANCH" == "master" ]]; then
+            PKG="dxvk-arm64ec-${VER}-${COMMIT}"
+          else
+            PKG="dxvk-arm64ec-${VER}-${COMMIT}-${SAFE_BRANCH}"
+          fi
+
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "LLVM_TAG=$LLVM_TAG" >> "$GITHUB_ENV"
+          echo "LLVM_URL=$ASSET_URL" >> "$GITHUB_ENV"
+          echo "COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Check existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_MODE: ${{ inputs.FORCE_MODE }}
+        run: |
+          if gh release view "$PKG" >/dev/null 2>&1 && [[ "$FORCE_MODE" != "true" ]]; then
+            echo "SKIP_RELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "SKIP_RELEASE=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download llvm-mingw
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          curl -fsSL "$LLVM_URL" -o llvm-mingw.tar.xz
+          mkdir llvm-mingw
+          tar -xf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
+          echo "$PWD/llvm-mingw/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          command -v arm64ec-w64-mingw32-clang >/dev/null 2>&1 || (echo "arm64ec toolchain not found in llvm-mingw" >&2; exit 1)
+          command -v i686-w64-mingw32-clang >/dev/null 2>&1 || (echo "i686 toolchain not found in llvm-mingw" >&2; exit 1)
+
+      - name: Configure cross files
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          cat > llvm-arm64ec.txt << 'EOF'
+          [binaries]
+          c = 'arm64ec-w64-mingw32-clang'
+          cpp = 'arm64ec-w64-mingw32-clang++'
+          ar = 'llvm-ar'
+          strip = 'llvm-strip'
+          windres = 'llvm-windres'
+          [properties]
+          needs_exe_wrapper = true
+          [host_machine]
+          system = 'windows'
+          cpu_family = 'aarch64'
+          cpu = 'arm64ec'
+          endian = 'little'
+          EOF
+
+          cat > llvm-win32.txt << 'EOF'
+          [binaries]
+          c = 'i686-w64-mingw32-clang'
+          cpp = 'i686-w64-mingw32-clang++'
+          ar = 'llvm-ar'
+          strip = 'llvm-strip'
+          windres = 'llvm-windres'
+          [properties]
+          needs_exe_wrapper = true
+          [host_machine]
+          system = 'windows'
+          cpu_family = 'x86'
+          cpu = 'x86'
+          endian = 'little'
+          EOF
+
+      - name: Build ARM64EC
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Db_lto=true -Db_ndebug=true -Dstrip=true
+          ninja -C build-arm64ec
+
+      - name: Build x86
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Db_lto=true -Db_ndebug=true -Dstrip=true
+          ninja -C build-x86
+
+      - name: Create Package (WCP)
+        if: env.SKIP_RELEASE != 'true'
+        run: |
+          mkdir -p pkg/system32 pkg/syswow64
+          DLLS=(d3d10core.dll d3d11.dll d3d8.dll d3d9.dll dxgi.dll)
+
+          for dll in "${DLLS[@]}"; do
+            A=$(find build-arm64ec -type f -name "$dll" | head -1 || true)
+            X=$(find build-x86     -type f -name "$dll" | head -1 || true)
+            [[ -n "$A" ]] && cp "$A" "pkg/system32/$dll"
+            [[ -n "$X" ]] && cp "$X" "pkg/syswow64/$dll"
+          done
+
+          cat > pkg/profile.json << JSONEOF
+          {
+            "type": "DXVK",
+            "versionName": "${VER}-arm64ec-${COMMIT}",
+            "versionCode": 0,
+            "description": "DXVK arm64ec",
+            "files": [
+              { "source": "system32/d3d10core.dll", "target": "${system32}/d3d10core.dll" },
+              { "source": "system32/d3d11.dll",     "target": "${system32}/d3d11.dll" },
+              { "source": "system32/d3d8.dll",      "target": "${system32}/d3d8.dll" },
+              { "source": "system32/d3d9.dll",      "target": "${system32}/d3d9.dll" },
+              { "source": "system32/dxgi.dll",      "target": "${system32}/dxgi.dll" },
+
+              { "source": "syswow64/d3d10core.dll", "target": "${syswow64}/d3d10core.dll" },
+              { "source": "syswow64/d3d11.dll",     "target": "${syswow64}/d3d11.dll" },
+              { "source": "syswow64/d3d8.dll",      "target": "${syswow64}/d3d8.dll" },
+              { "source": "syswow64/d3d9.dll",      "target": "${syswow64}/d3d9.dll" },
+              { "source": "syswow64/dxgi.dll",      "target": "${syswow64}/dxgi.dll" }
+            ]
+          }
+          JSONEOF
+
+          cd pkg && tar --zstd -cf "../${PKG}.wcp" . && cd ..
+
+      - name: Publish Release
+        if: env.SKIP_RELEASE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_MODE: ${{ inputs.FORCE_MODE }}
+        run: |
+          if gh release view "$PKG" >/dev/null 2>&1; then
+            if [[ "$FORCE_MODE" != "true" ]]; then exit 0; fi
+            gh release delete "$PKG" --yes --cleanup-tag
+          fi
+
+          gh release create "$PKG" "${PKG}.wcp" \
+            --title "$PKG" \
+            --notes "DXVK arm64ec ${VER} (branch: ${BRANCH}, commit: ${COMMIT}) built with llvm-mingw ${LLVM_TAG}"
