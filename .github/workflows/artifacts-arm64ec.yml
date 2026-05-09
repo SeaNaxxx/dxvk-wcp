@@ -123,13 +123,14 @@ jobs:
           cpp = 'arm64ec-w64-mingw32-clang++'
           ar = 'llvm-ar'
           strip = 'llvm-strip'
-          windres = 'llvm-windres'
-          [properties]
-          needs_exe_wrapper = true
+          windres = 'arm64ec-w64-mingw32-windres'
+          widl = 'arm64ec-w64-mingw32-widl'
+          pkg-config = 'pkg-config'
+
           [host_machine]
           system = 'windows'
           cpu_family = 'aarch64'
-          cpu = 'arm64ec'
+          cpu = 'aarch64'
           endian = 'little'
           EOF
 
@@ -139,40 +140,48 @@ jobs:
           cpp = 'i686-w64-mingw32-clang++'
           ar = 'llvm-ar'
           strip = 'llvm-strip'
-          windres = 'llvm-windres'
-          [properties]
-          needs_exe_wrapper = true
+          windres = 'i686-w64-mingw32-windres'
+          widl = 'i686-w64-mingw32-widl'
+          pkg-config = 'pkg-config'
+
           [host_machine]
           system = 'windows'
           cpu_family = 'x86'
-          cpu = 'x86'
+          cpu = 'i686'
           endian = 'little'
           EOF
 
       - name: Build ARM64EC
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Db_lto=true -Db_ndebug=true -Dstrip=true
-          ninja -C build-arm64ec
+          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Dstrip=true
+          ninja -C build-arm64ec -j 2
 
       - name: Build x86
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Db_lto=true -Db_ndebug=true -Dstrip=true
-          ninja -C build-x86
+          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Dstrip=true
+          ninja -C build-x86 -j 2
 
       - name: Create Package (WCP)
         if: env.SKIP_RELEASE != 'true'
         run: |
           mkdir -p pkg/system32 pkg/syswow64
-          DLLS=(d3d10core.dll d3d11.dll d3d8.dll d3d9.dll dxgi.dll)
 
-          for dll in "${DLLS[@]}"; do
-            A=$(find build-arm64ec -type f -name "$dll" | head -1 || true)
-            X=$(find build-x86     -type f -name "$dll" | head -1 || true)
-            [[ -n "$A" ]] && cp "$A" "pkg/system32/$dll"
-            [[ -n "$X" ]] && cp "$X" "pkg/syswow64/$dll"
-          done
+          copy_dll() {
+            SRC_DIR=$1
+            DEST_DIR=$2
+            cp "${SRC_DIR}/src/d3d11/d3d11.dll" "$DEST_DIR/" || true
+            cp "${SRC_DIR}/src/d3d10/d3d10core.dll" "$DEST_DIR/" || true
+            cp "${SRC_DIR}/src/d3d9/d3d9.dll" "$DEST_DIR/" || true
+            cp "${SRC_DIR}/src/d3d8/d3d8.dll" "$DEST_DIR/" || true
+            cp "${SRC_DIR}/src/dxgi/dxgi.dll" "$DEST_DIR/" || true
+          }
+          copy_dll "build-arm64ec" "pkg/system32"
+          copy_dll "build-x86" "pkg/syswow64"
+
+          llvm-strip --strip-all pkg/system32/*.dll
+          llvm-strip --strip-all pkg/syswow64/*.dll
 
           cat > pkg/profile.json << JSONEOF
           {

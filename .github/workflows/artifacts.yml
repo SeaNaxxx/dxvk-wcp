@@ -40,7 +40,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq glslang-tools python3-pip zstd
+          sudo apt-get install -y curl jq glslang-tools python3-pip zstd mingw-w64
           python3 -m pip install --user meson ninja
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
