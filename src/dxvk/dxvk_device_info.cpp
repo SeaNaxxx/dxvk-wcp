@@ -53,6 +53,7 @@ namespace dxvk {
     HANDLE_EXT(khrMaintenance8);                   \
     HANDLE_EXT(khrMaintenance9);                   \
     HANDLE_EXT(khrMaintenance10);                  \
+    HANDLE_EXT(khrMaintenance11);                  \
     HANDLE_EXT(khrPipelineLibrary);                \
     HANDLE_EXT(khrPresentId);                      \
     HANDLE_EXT(khrPresentId2);                     \
@@ -483,10 +484,14 @@ namespace dxvk {
     if (m_featuresSupported.extDescriptorHeap.descriptorHeap) {
       // Only enable descriptor heaps on drivers that are known to work
       // and don't have known performance regressions currently.
-      // TODO revisit w.r.t. Nvidia, Intel, Turnip.
+      // TODO revisit w.r.t. Intel, Turnip.
       bool enableDescriptorHeap = m_properties.vk12.driverID == VK_DRIVER_ID_MESA_RADV
                                || m_properties.vk12.driverID == VK_DRIVER_ID_MESA_LLVMPIPE
                                || m_properties.vk12.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
+
+      // Heap regresses performance on the initial NV driver releases
+      if (m_properties.vk12.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
+        enableDescriptorHeap = m_featuresSupported.khrMaintenance11.maintenance11;
 
       applyTristate(enableDescriptorHeap, instance.options().enableDescriptorHeap);
 
@@ -988,6 +993,7 @@ namespace dxvk {
       ENABLE_EXT_FEATURE(khrMaintenance8, maintenance8, false),
       ENABLE_EXT_FEATURE(khrMaintenance9, maintenance9, false),
       ENABLE_EXT_FEATURE(khrMaintenance10, maintenance10, false),
+      ENABLE_EXT_FEATURE(khrMaintenance11, maintenance11, false),
 
       /* Dependency for graphics pipeline library */
       ENABLE_EXT(khrPipelineLibrary, false),
