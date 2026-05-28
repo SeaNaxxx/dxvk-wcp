@@ -163,13 +163,13 @@ jobs:
       - name: Build ARM64EC
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Dstrip=true
+          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Dstrip=false
           ninja -C build-arm64ec -j 2
 
       - name: Build x86
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Dstrip=true
+          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Dstrip=false
           ninja -C build-x86 -j 2
 
       - name: Create Package (WCP)
@@ -189,8 +189,6 @@ jobs:
           copy_dll "build-arm64ec" "pkg/system32"
           copy_dll "build-x86" "pkg/syswow64"
 
-          llvm-strip --strip-all pkg/system32/*.dll
-          llvm-strip --strip-all pkg/syswow64/*.dll
 
           cat > pkg/profile.json << JSONEOF
           {
