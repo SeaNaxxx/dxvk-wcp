@@ -163,13 +163,13 @@ jobs:
       - name: Build ARM64EC
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release -Dstrip=false
+          meson setup build-arm64ec . --cross-file llvm-arm64ec.txt --buildtype release
           ninja -C build-arm64ec -j 2
 
       - name: Build x86
         if: env.SKIP_RELEASE != 'true'
         run: |
-          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release -Dstrip=false
+          meson setup build-x86 . --cross-file llvm-win32.txt --buildtype release
           ninja -C build-x86 -j 2
 
       - name: Create Package (WCP)
