@@ -3798,7 +3798,9 @@ namespace dxvk {
     if (unlikely(ShouldRecord()))
       return m_recorder->SetStreamSourceFreq(StreamNumber, Setting);
 
-    if (m_state.streamFreq[StreamNumber] == Setting)
+    UINT oldSetting = m_state.streamFreq[StreamNumber];
+
+    if (oldSetting == Setting)
       return D3D_OK;
 
     m_state.streamFreq[StreamNumber] = Setting;
@@ -3808,7 +3810,10 @@ namespace dxvk {
     else
       m_vbSlotTracking.instanced &= ~(1u << StreamNumber);
 
-    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
+    // If both the previous and current setting are vertex data, the
+    // change only affects the instance count, not the input layout.
+    if ((oldSetting | Setting) & D3DSTREAMSOURCE_INSTANCEDATA)
+      m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
 
     return D3D_OK;
   }
@@ -7240,11 +7245,6 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindSampler(DWORD Sampler) {
-    auto samplerInfo = RemapStateSamplerShader(Sampler);
-
-    const uint32_t slot = D3D9ShaderResourceMapping::computeTextureBinding(
-      samplerInfo.first, uint32_t(samplerInfo.second));
-
     m_samplerBindCount++;
 
     const D3D9CommonTexture* tex = GetCommonTexture(m_state.textures[Sampler]);
@@ -7256,7 +7256,7 @@ namespace dxvk {
       imageView = tex->GetSampleView(srgb);
 
     EmitCs([this,
-      cSlot       = slot,
+      cSlot       = Sampler,
       cState      = D3D9SamplerInfo(m_state.samplerStates[Sampler]),
       cIsCube     = tex && tex->IsCube(),
       cIsMultiMip = tex && (tex->Desc()->MipLevels > 1u),
@@ -7316,8 +7316,8 @@ namespace dxvk {
           key.setViewProperties(cView->info().unpackSwizzle(), cView->info().format);
       }
 
-      VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-      ctx->bindResourceSampler(stage, cSlot, m_dxvkDevice->createSampler(key));
+      auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(cSlot);
+      ctx->bindResourceSampler(stage, slot, m_dxvkDevice->createSampler(key));
 
       // Let the main thread know about current sampler stats
       uint64_t liveCount = m_dxvkDevice->getSamplerStats().liveCount;
@@ -7327,40 +7327,23 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::BindTexture(DWORD StateSampler) {
-    auto shaderSampler = RemapStateSamplerShader(StateSampler);
-
-    uint32_t slot = D3D9ShaderResourceMapping::computeTextureBinding(shaderSampler.first,
-      uint32_t(shaderSampler.second));
-
-    const bool srgb =
-      m_state.samplerStates[StateSampler][D3DSAMP_SRGBTEXTURE] & 0x1;
-
-    D3D9CommonTexture* commonTex =
-      GetCommonTexture(m_state.textures[StateSampler]);
-
-    Rc<DxvkImageView> imageView = commonTex->GetSampleView(srgb);
+    bool srgb = m_state.samplerStates[StateSampler][D3DSAMP_SRGBTEXTURE] & 0x1;
+    D3D9CommonTexture* commonTex = GetCommonTexture(m_state.textures[StateSampler]);
 
     EmitCs([
-      cSlot = slot,
-      cImageView = std::move(imageView)
+      cSlot       = StateSampler,
+      cImageView  = commonTex->GetSampleView(srgb)
     ](DxvkContext* ctx) mutable {
-      VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-      ctx->bindResourceImageView(stage, cSlot, std::move(cImageView));
+      auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(cSlot);
+      ctx->bindResourceImageView(stage, slot, std::move(cImageView));
     });
   }
 
 
   void D3D9DeviceEx::UnbindTextures(uint32_t mask) {
-    EmitCs([
-      cMask = mask
-    ](DxvkContext* ctx) {
+    EmitCs([cMask = mask] (DxvkContext* ctx) {
       for (uint32_t i : bit::BitMask(cMask)) {
-        auto shaderSampler = RemapStateSamplerShader(i);
-
-        uint32_t slot = D3D9ShaderResourceMapping::computeTextureBinding(shaderSampler.first,
-          uint32_t(shaderSampler.second));
-
-        VkShaderStageFlags stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(i);
         ctx->bindResourceImageView(stage, slot, nullptr);
       }
     });
@@ -7799,6 +7782,7 @@ namespace dxvk {
           binding.extent = vertexSizes[attrib.binding];
 
           uint32_t instanceData = cStreamFreq[binding.binding % caps::MaxStreams];
+
           if (instanceData & D3DSTREAMSOURCE_INSTANCEDATA) {
             binding.divisor = instanceData & 0x7FFFFF; // Remove instance packed-in flags in the data.
             binding.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
@@ -8791,11 +8775,10 @@ namespace dxvk {
 
     EmitCs([
       cSize = m_state.textures->size()
-    ](DxvkContext* ctx) {
+    ] (DxvkContext* ctx) {
       for (uint32_t i = 0; i < cSize; i++) {
-        auto samplerInfo = RemapStateSamplerShader(DWORD(i));
-        uint32_t slot = D3D9ShaderResourceMapping::computeTextureBinding(samplerInfo.first, uint32_t(samplerInfo.second));
-        ctx->bindResourceImageView(GetShaderStage(samplerInfo.first), slot, nullptr);
+        auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(i);
+        ctx->bindResourceImageView(stage, slot, nullptr);
       }
     });
 
