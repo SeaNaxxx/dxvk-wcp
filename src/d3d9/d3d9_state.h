@@ -33,43 +33,62 @@ namespace dxvk {
     }
   };
 
-  struct D3D9RenderStateInfo {
-    std::array<float, 3> fogColor = { };
-    float fogScale   = 0.0f;
-    float fogEnd     = 1.0f;
-    float fogDensity = 1.0f;
+  /// Shared push data
+  struct D3D9SharedPushData {
+    static constexpr VkShaderStageFlags Stages = VK_SHADER_STAGE_ALL_GRAPHICS;
+    static constexpr uint32_t           Offset = 0u;
 
-    uint32_t alphaRef = 0u;
+    uint8_t fogColor[3] = {};
+    uint8_t alphaRef = 0u;
 
-    float pointSize    = 1.0f;
-    float pointSizeMin = 1.0f;
-    float pointSizeMax = 64.0f;
-    float pointScaleA  = 1.0f;
-    float pointScaleB  = 0.0f;
-    float pointScaleC  = 0.0f;
+    float fogDistanceScale = 0.0f;
+    float fogDistanceEnd = 0.0f;
+    float fogDensity = 0.0f;
+  };
+
+  /// Vertex shader push data
+  struct D3D9VsPushData {
+    // We don't have enough VS-only push data space available to fit all
+    // possible samplers, constant buffers and data in there, so put VS
+    // data into the shared block.
+    static constexpr VkShaderStageFlags Stages = VK_SHADER_STAGE_ALL_GRAPHICS;
+    static constexpr uint32_t           Offset = sizeof(D3D9SharedPushData);
+
+    // Dynamically indexed float count
+    uint16_t floatCount = 0u;
+    // Point size, as 13.3 fixed-point
+    uint16_t pointSize = 0u;
+    uint16_t pointSizeMin = 0u;
+    uint16_t pointSizeMax = 0u;
+  };
+
+  /// Fixed-function vertex shader push data.
+  /// Can theoretically use up to 32 bytes.
+  struct D3D9FfvsPushData {
+    static constexpr VkShaderStageFlags Stages = VK_SHADER_STAGE_VERTEX_BIT;
+    static constexpr uint32_t           Offset = 0u;
+
+    float pointScaleA = 0.0f;
+    float pointScaleB = 0.0f;
+    float pointScaleC = 0.0f;
+  };
+
+  /// Fixed-function pixel shader push data.
+  struct D3D9FfpsPushData {
+    static constexpr VkShaderStageFlags Stages = VK_SHADER_STAGE_FRAGMENT_BIT;
+    static constexpr uint32_t           Offset = 0u;
 
     uint32_t textureFactor = 0u;
   };
 
-  enum class D3D9RenderStateItem {
-    FogColor   = 0,
-    FogScale   = 1,
-    FogEnd,
-    FogDensity,
-    AlphaRef,
-
-    PointSize,
-    PointSizeMin,
-    PointSizeMax,
-    PointScaleA,
-    PointScaleB,
-    PointScaleC,
-
-    TextureFactor,
-
-    Count
+  /// Complete push data state. Note that the data layout inside
+  /// this struct is different from what it is in shaders.
+  struct D3D9PushData {
+    D3D9SharedPushData shared;
+    D3D9VsPushData vs;
+    D3D9FfvsPushData ffvs;
+    D3D9FfpsPushData ffps;
   };
-
 
   // This is needed in fixed function for POSITION_T support.
   // These are constants we need to * and add to move
@@ -112,66 +131,6 @@ namespace dxvk {
     float Phi;
   };
 
-  struct D3D9FFShaderKeyVSData {
-    union {
-      struct {
-        uint32_t TexcoordIndices : 24;
-
-        uint32_t VertexHasPositionT : 1;
-
-        uint32_t VertexHasColor0 : 1; // Diffuse
-        uint32_t VertexHasColor1 : 1; // Specular
-
-        uint32_t VertexHasPointSize : 1;
-
-        uint32_t UseLighting : 1;
-
-        uint32_t NormalizeNormals : 1;
-        uint32_t LocalViewer : 1;
-        uint32_t RangeFog : 1;
-
-        // End of uint32_t
-
-        uint32_t TexcoordFlags : 24;
-
-        uint32_t DiffuseSource : 2;
-        uint32_t AmbientSource : 2;
-        uint32_t SpecularSource : 2;
-        uint32_t EmissiveSource : 2;
-
-        // Next uint32_t
-
-        uint32_t TransformFlags : 24;
-
-        uint32_t LightCount : 4;
-
-        // End of uint32_t
-
-        uint32_t VertexTexcoordDeclMask : 24;
-        uint32_t VertexHasFog : 1;
-
-        uint32_t VertexBlendMode    : 2;
-        uint32_t VertexBlendIndexed : 1;
-        uint32_t VertexBlendCount   : 2;
-
-        uint32_t VertexClipping     : 1;
-
-        // End of uint32_t
-      } Contents;
-
-      uint32_t Primitive[5];
-    };
-  };
-
-  struct D3D9FFShaderKeyVS {
-    D3D9FFShaderKeyVS() {
-      // memcmp safety
-      std::memset(&Data, 0, sizeof(Data));
-    }
-
-    D3D9FFShaderKeyVSData Data;
-  };
-
   struct D3D9FixedFunctionVS {
     Matrix4 WorldView;
     Matrix4 NormalMatrix;
@@ -187,7 +146,39 @@ namespace dxvk {
     D3DMATERIAL9 Material;
     float TweenFactor;
 
-    D3D9FFShaderKeyVSData Key;
+    // Following part uses uint8 and bool so it's gonna be represented as uint32 in the shader and manually unpacked:
+    std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordIndices;
+    std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordFlags;
+    std::array<uint8_t, caps::MaxTextureBlendStages> TexcoordTransformFlags;
+
+    // How many vector components does each texcoord have
+    uint32_t VertexTexcoordDeclMask;
+
+    // Vertex Decl
+    bool VertexHasPositionT;
+    bool VertexHasColor0; // Diffuse
+    bool VertexHasColor1; // Specular
+    bool VertexHasPointSize;
+    bool VertexHasFog;
+
+    // Blending
+    uint8_t VertexBlendMode;
+    bool VertexBlendIndexed;
+    uint8_t VertexBlendCount;
+
+    // Misc
+    bool VertexClipping;
+    bool NormalizeNormals;
+    bool LocalViewer;
+    bool RangeFog;
+
+    // Lighting
+    bool UseLighting;
+    uint8_t LightCount;
+    uint8_t DiffuseSource;
+    uint8_t AmbientSource;
+    uint8_t SpecularSource;
+    uint8_t EmissiveSource;
   };
 
   static constexpr uint32_t D3D9MaxVertexBlendTransformsHw = 8u;

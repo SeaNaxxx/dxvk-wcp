@@ -54,21 +54,11 @@ namespace dxvk {
 
     m_length = parser.getByteOffset();
 
-    if (m_constants.floatsAccessedDynamically) {
-      // Repurpose float mask as shader-defined constant mask
-      // as a mask of defined constants as necessary
-      constMaskF.clear();
+    // The compiler will always constant-fold inline constants that
+    // are statically indexed, so there is no need to keep them around
+    for (size_t i = 0u; i < shaderDefs.floats.size(); i++)
+      clrBit(constMaskF, shaderDefs.floats[i].index);
 
-      for (size_t i = 0u; i < shaderDefs.floats.size(); i++)
-        setBit(constMaskF, shaderDefs.floats[i].index);
-    } else {
-      // The compiler will always constant-fold inline constants that
-      // are statically indexed, so there is no need to keep them around
-      for (size_t i = 0u; i < shaderDefs.floats.size(); i++)
-        clrBit(constMaskF, shaderDefs.floats[i].index);
-    }
-
-    // Same for shader-defied floats, they will never be read from the buffer.
     for (size_t i = 0u; i < shaderDefs.ints.size(); i++)
       clrBit(constMaskI, shaderDefs.ints[i]);
 
@@ -80,7 +70,7 @@ namespace dxvk {
     D3D9ConstantBufferLayout constLayoutI(constMaskI.size(), constMaskI.data());
     D3D9ConstantBufferLayout constLayoutB;
 
-    if (m_isSWVP) {
+    if (m_isSWVP && m_shaderInfo.getType() == ShaderType::eVertex) {
       // Pad bool constants to a multiple of 16 bytes so we
       // can trivially keep all the other constants aligned
       uint32_t dwordCount = align(m_constants.boolCount, 32u) / 32u;
@@ -132,7 +122,8 @@ namespace dxvk {
         case RegisterType::eConstBool: {
           m_constants.boolCount = std::max(m_constants.boolCount, index + count);
 
-          if (!m_isSWVP) // SWVP raises the constant limit too high to use bit mask.
+          // SWVP raises the constant limit too high to use bit mask.
+          if (!m_isSWVP || m_shaderInfo.getType() != ShaderType::eVertex)
             m_constants.boolMask |= 1u << index;
         } break;
 
@@ -149,10 +140,8 @@ namespace dxvk {
               m_isSWVP ? MaxFloatConstantsSoftware : hwvpFloatConstantsCount);
 
             m_constants.floatsAccessedDynamically = true;
-          }
-
-          // Access mask is useless if we have dynamic indexing
-          if (!m_constants.floatsAccessedDynamically) {
+          } else {
+            // Gather indices of statically accessed constants
             for (uint32_t j = 0u; j < count; j++)
               setBit(constMaskF, index + j);
           }

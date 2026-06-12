@@ -126,32 +126,26 @@ namespace dxvk {
 
     // Initially set all the dirty flags so we
     // always end up giving the backend *something* to work with.
-    m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer);
-    m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
-    m_dirty.set(D3D9DeviceDirtyFlag::DepthStencilState);
-    m_dirty.set(D3D9DeviceDirtyFlag::BlendState);
-    m_dirty.set(D3D9DeviceDirtyFlag::RasterizerState);
-    m_dirty.set(D3D9DeviceDirtyFlag::DepthBias);
-    m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
-    m_dirty.set(D3D9DeviceDirtyFlag::InputLayout);
-    m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
-    m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
-
-    m_dirty.set(D3D9DeviceDirtyFlag::FogState);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
-
-    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexData);
-    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexBlend);
-    m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
-    m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
-    m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
-    m_dirty.set(D3D9DeviceDirtyFlag::FFGlobalSpecular);
-    m_dirty.set(D3D9DeviceDirtyFlag::SharedPixelShaderData);
-    m_dirty.set(D3D9DeviceDirtyFlag::DepthBounds);
-    m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
+    m_dirty.set(D3D9DeviceDirtyFlag::Framebuffer,
+                D3D9DeviceDirtyFlag::ClipPlanes,
+                D3D9DeviceDirtyFlag::DepthStencilState,
+                D3D9DeviceDirtyFlag::BlendState,
+                D3D9DeviceDirtyFlag::RasterizerState,
+                D3D9DeviceDirtyFlag::DepthBias,
+                D3D9DeviceDirtyFlag::AlphaTestState,
+                D3D9DeviceDirtyFlag::InputLayout,
+                D3D9DeviceDirtyFlag::ViewportScissor,
+                D3D9DeviceDirtyFlag::MultiSampleState,
+                D3D9DeviceDirtyFlag::Fog,
+                D3D9DeviceDirtyFlag::FFVertexData,
+                D3D9DeviceDirtyFlag::FFVertexBlend,
+                D3D9DeviceDirtyFlag::FFVertexShader,
+                D3D9DeviceDirtyFlag::FFPixelShader,
+                D3D9DeviceDirtyFlag::FFViewport,
+                D3D9DeviceDirtyFlag::FFGlobalSpecular,
+                D3D9DeviceDirtyFlag::SharedPixelShaderData,
+                D3D9DeviceDirtyFlag::DepthBounds,
+                D3D9DeviceDirtyFlag::PointScale);
 
     m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
 
@@ -2119,7 +2113,6 @@ namespace dxvk {
     m_dirty.set(D3D9DeviceDirtyFlag::ViewportScissor);
     m_dirty.set(D3D9DeviceDirtyFlag::FFViewport);
     m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
-
     return D3D_OK;
   }
 
@@ -2447,11 +2440,13 @@ namespace dxvk {
           break;
 
         case D3DRS_ALPHAREF:
-          UpdatePushConstant<D3D9RenderStateItem::AlphaRef>();
+          m_pushData.shared.alphaRef = Value;
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
           break;
 
         case D3DRS_TEXTUREFACTOR:
-          UpdatePushConstant<D3D9RenderStateItem::TextureFactor>();
+          m_pushData.ffps.textureFactor = Value;
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataFfps);
           break;
 
         case D3DRS_DIFFUSEMATERIALSOURCE:
@@ -2476,28 +2471,15 @@ namespace dxvk {
         case D3DRS_FOGENABLE:
         case D3DRS_FOGVERTEXMODE:
         case D3DRS_FOGTABLEMODE:
-          m_dirty.set(D3D9DeviceDirtyFlag::FogState);
+        case D3DRS_FOGCOLOR:
+        case D3DRS_FOGSTART:
+        case D3DRS_FOGEND:
+        case D3DRS_FOGDENSITY:
+          m_dirty.set(D3D9DeviceDirtyFlag::Fog);
           break;
 
         case D3DRS_RANGEFOGENABLE:
           m_dirty.set(D3D9DeviceDirtyFlag::FFVertexShader);
-          break;
-
-        case D3DRS_FOGCOLOR:
-          m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
-          break;
-
-        case D3DRS_FOGSTART:
-          m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
-          break;
-
-        case D3DRS_FOGEND:
-          m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
-          m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
-          break;
-
-        case D3DRS_FOGDENSITY:
-          m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
           break;
 
         case D3DRS_POINTSIZE: {
@@ -2545,16 +2527,19 @@ namespace dxvk {
             }
           }
 
-          UpdatePushConstant<D3D9RenderStateItem::PointSize>();
+          m_pushData.vs.pointSize = EncodePointSize(Value);
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataVs);
           break;
         }
 
         case D3DRS_POINTSIZE_MIN:
-          UpdatePushConstant<D3D9RenderStateItem::PointSizeMin>();
+          m_pushData.vs.pointSizeMin = EncodePointSize(Value);
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataVs);
           break;
 
         case D3DRS_POINTSIZE_MAX:
-          UpdatePushConstant<D3D9RenderStateItem::PointSizeMax>();
+          m_pushData.vs.pointSizeMax = EncodePointSize(Value);
+          m_dirty.set(D3D9DeviceDirtyFlag::PushDataVs);
           break;
 
         case D3DRS_POINTSCALE_A:
@@ -6072,6 +6057,10 @@ namespace dxvk {
       copyArgs.floatConstantCount = dynamicFloatCount;
       copyArgs.flushNan = m_d3d9Options.d3d9FloatEmulation == D3D9FloatEmulation::Enabled;
 
+      // Over-allocate buffer by one constant so that we always have
+      // at least one entry that reads zeroes.
+      dynamicSize += sizeof(Vector4);
+
       // Allocate storage for dynamically indexed floats. Pad this
       // to the full allocation size as well so we write everything.
       auto& buffer = GetConstantBuffer(CbvIndex::VSDynamicConstants);
@@ -6082,6 +6071,12 @@ namespace dxvk {
       copyArgs.constFloatApi = m_state.vsConsts->fConsts;
 
       layout->copyConstantData(copyArgs);
+
+      // Pass float count to vertex shader
+      if (m_pushData.vs.floatCount != dynamicFloatCount) {
+        m_pushData.vs.floatCount = dynamicFloatCount;
+        m_dirty.set(D3D9DeviceDirtyFlag::PushDataVs);
+      }
     }
 
     constants.dirty = false;
@@ -6109,85 +6104,6 @@ namespace dxvk {
 
     if (m_specInfo.set<SpecClipPlaneCount>(clipPlaneCount))
       m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
-  }
-
-
-  template <uint32_t Offset, uint32_t Length>
-  void D3D9DeviceEx::UpdatePushConstant(const void* pData) {
-    struct ConstantData { uint8_t Data[Length]; };
-
-    const ConstantData* constData = reinterpret_cast<const ConstantData*>(pData);
-
-    EmitCs([
-      cData = *constData
-    ](DxvkContext* ctx) {
-      // Render state uses the shared push constant block
-      ctx->pushData(VK_SHADER_STAGE_ALL_GRAPHICS, Offset, Length, &cData);
-    });
-  }
-
-
-  template <D3D9RenderStateItem Item>
-  void D3D9DeviceEx::UpdatePushConstant() {
-    auto& rs = m_state.renderStates;
-
-    if constexpr (Item == D3D9RenderStateItem::AlphaRef) {
-      uint32_t alpha = rs[D3DRS_ALPHAREF] & 0xFF;
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, alphaRef), sizeof(uint32_t)>(&alpha);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::FogColor) {
-      Vector4 color;
-      DecodeD3DCOLOR(D3DCOLOR(rs[D3DRS_FOGCOLOR]), color.data);
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, fogColor), sizeof(D3D9RenderStateInfo::fogColor)>(&color);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::FogDensity) {
-      float density = bit::cast<float>(rs[D3DRS_FOGDENSITY]);
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, fogDensity), sizeof(float)>(&density);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::FogEnd) {
-      float end = bit::cast<float>(rs[D3DRS_FOGEND]);
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, fogEnd), sizeof(float)>(&end);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::FogScale) {
-      float end = bit::cast<float>(rs[D3DRS_FOGEND]);
-      float start = bit::cast<float>(rs[D3DRS_FOGSTART]);
-
-      float scale = 1.0f / (end - start);
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, fogScale), sizeof(float)>(&scale);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointSize) {
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointSize), sizeof(float)>(&rs[D3DRS_POINTSIZE]);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointSizeMin) {
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointSizeMin), sizeof(float)>(&rs[D3DRS_POINTSIZE_MIN]);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointSizeMax) {
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointSizeMax), sizeof(float)>(&rs[D3DRS_POINTSIZE_MAX]);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointScaleA) {
-      float scale = bit::cast<float>(rs[D3DRS_POINTSCALE_A]);
-      scale /= float(m_state.viewport.Height * m_state.viewport.Height);
-
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointScaleA), sizeof(float)>(&scale);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointScaleB) {
-      float scale = bit::cast<float>(rs[D3DRS_POINTSCALE_B]);
-      scale /= float(m_state.viewport.Height * m_state.viewport.Height);
-
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointScaleB), sizeof(float)>(&scale);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::PointScaleC) {
-      float scale = bit::cast<float>(rs[D3DRS_POINTSCALE_C]);
-      scale /= float(m_state.viewport.Height * m_state.viewport.Height);
-
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, pointScaleC), sizeof(float)>(&scale);
-    }
-    else if constexpr (Item == D3D9RenderStateItem::TextureFactor) {
-      uint32_t textureFactor = bit::cast<uint32_t>(rs[D3DRS_TEXTUREFACTOR]);
-      UpdatePushConstant<offsetof(D3D9RenderStateInfo, textureFactor), sizeof(uint32_t)>(&textureFactor);
-    }
-    else
-      Logger::warn("D3D9: Invalid push constant set to update.");
   }
 
 
@@ -6653,9 +6569,12 @@ namespace dxvk {
     if (rs[D3DRS_POINTSCALEENABLE] && m_dirty.test(D3D9DeviceDirtyFlag::PointScale)) {
       m_dirty.clr(D3D9DeviceDirtyFlag::PointScale);
 
-      UpdatePushConstant<D3D9RenderStateItem::PointScaleA>();
-      UpdatePushConstant<D3D9RenderStateItem::PointScaleB>();
-      UpdatePushConstant<D3D9RenderStateItem::PointScaleC>();
+      float scale = 1.0f / float(m_state.viewport.Height * m_state.viewport.Height);
+      m_pushData.ffvs.pointScaleA = scale * bit::cast<float>(rs[D3DRS_POINTSCALE_A]);
+      m_pushData.ffvs.pointScaleB = scale * bit::cast<float>(rs[D3DRS_POINTSCALE_B]);
+      m_pushData.ffvs.pointScaleC = scale * bit::cast<float>(rs[D3DRS_POINTSCALE_C]);
+
+      m_dirty.set(D3D9DeviceDirtyFlag::PushDataFfvs);
     }
 
     UpdatePointModeSpec(mode);
@@ -6663,70 +6582,38 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateFog() {
+    m_dirty.clr(D3D9DeviceDirtyFlag::Fog);
+
     auto& rs = m_state.renderStates;
+    bool fogEnabled = bool(rs[D3DRS_FOGENABLE]);
 
-    bool fogEnabled = rs[D3DRS_FOGENABLE];
+    // Only set up vertex frog if pixel fog is not used
+    D3DFOGMODE vsFog = D3DFOG_NONE;
+    D3DFOGMODE psFog = D3DFOG_NONE;
 
-    bool pixelFog   = rs[D3DRS_FOGTABLEMODE]  != D3DFOG_NONE && fogEnabled;
-    bool vertexFog  = rs[D3DRS_FOGVERTEXMODE] != D3DFOG_NONE && fogEnabled && !pixelFog;
+    if (fogEnabled) {
+      psFog = D3DFOGMODE(rs[D3DRS_FOGTABLEMODE]);
 
-    auto UpdateFogConstants = [&](D3DFOGMODE FogMode) {
-      if (m_dirty.test(D3D9DeviceDirtyFlag::FogColor)) {
-        m_dirty.clr(D3D9DeviceDirtyFlag::FogColor);
-        UpdatePushConstant<D3D9RenderStateItem::FogColor>();
-      }
-
-      if (FogMode == D3DFOG_LINEAR) {
-        if (m_dirty.test(D3D9DeviceDirtyFlag::FogScale)) {
-          m_dirty.clr(D3D9DeviceDirtyFlag::FogScale);
-          UpdatePushConstant<D3D9RenderStateItem::FogScale>();
-        }
-
-        if (m_dirty.test(D3D9DeviceDirtyFlag::FogEnd)) {
-          m_dirty.clr(D3D9DeviceDirtyFlag::FogEnd);
-          UpdatePushConstant<D3D9RenderStateItem::FogEnd>();
-        }
-      }
-      else if (FogMode == D3DFOG_EXP || FogMode == D3DFOG_EXP2) {
-        if (m_dirty.test(D3D9DeviceDirtyFlag::FogDensity)) {
-          m_dirty.clr(D3D9DeviceDirtyFlag::FogDensity);
-          UpdatePushConstant<D3D9RenderStateItem::FogDensity>();
-        }
-      }
-    };
-
-    if (vertexFog) {
-      D3DFOGMODE mode = D3DFOGMODE(rs[D3DRS_FOGVERTEXMODE]);
-
-      UpdateFogConstants(mode);
-
-      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
-        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
-
-        UpdateFogModeSpec(true, mode, D3DFOG_NONE);
-      }
+      if (psFog == D3DFOG_NONE)
+        vsFog = D3DFOGMODE(rs[D3DRS_FOGVERTEXMODE]);
     }
-    else if (pixelFog) {
-      D3DFOGMODE mode = D3DFOGMODE(rs[D3DRS_FOGTABLEMODE]);
 
-      UpdateFogConstants(mode);
+    UpdateFogModeSpec(fogEnabled, vsFog, psFog);
 
-      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
-        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
+    // Update fog parameters
+    uint32_t fogColor = rs[D3DRS_FOGCOLOR];
+    float fogDensity = bit::cast<float>(rs[D3DRS_FOGDENSITY]);
+    float fogEnd   = bit::cast<float>(rs[D3DRS_FOGEND]);
+    float fogStart = bit::cast<float>(rs[D3DRS_FOGSTART]);
 
-        UpdateFogModeSpec(true, D3DFOG_NONE, mode);
-      }
-    }
-    else {
-      if (fogEnabled)
-        UpdateFogConstants(D3DFOG_NONE);
+    m_pushData.shared.fogColor[0] = uint8_t(fogColor >>  0u);
+    m_pushData.shared.fogColor[1] = uint8_t(fogColor >>  8u);
+    m_pushData.shared.fogColor[2] = uint8_t(fogColor >> 16u);
+    m_pushData.shared.fogDensity = fogDensity;
+    m_pushData.shared.fogDistanceEnd = fogEnd;
+    m_pushData.shared.fogDistanceScale = (fogEnd != fogStart) ? 1.0f / (fogEnd - fogStart) : 0.0f;
 
-      if (m_dirty.test(D3D9DeviceDirtyFlag::FogState)) {
-        m_dirty.clr(D3D9DeviceDirtyFlag::FogState);
-
-        UpdateFogModeSpec(fogEnabled, D3DFOG_NONE, D3DFOG_NONE);
-      }
-    }
+    m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared);
   }
 
 
@@ -6737,6 +6624,31 @@ namespace dxvk {
 
     if (m_specInfo.set<D3D9SpecConstantId::SpecFFGlobalSpecularEnabled>(specularEnabled))
       m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
+  }
+
+
+  template<typename T>
+  void D3D9DeviceEx::UpdatePushDataBlock(const T& Block) {
+    EmitCs([cBlock = Block] (DxvkContext* ctx) {
+      ctx->pushData(T::Stages, T::Offset, sizeof(T), &cBlock);
+    });
+  }
+
+
+  void D3D9DeviceEx::UpdatePushData() {
+    if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataShared))
+      UpdatePushDataBlock(m_pushData.shared);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataVs))
+      UpdatePushDataBlock(m_pushData.vs);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataFfvs))
+      UpdatePushDataBlock(m_pushData.ffvs);
+    if (m_dirty.test(D3D9DeviceDirtyFlag::PushDataFfps))
+      UpdatePushDataBlock(m_pushData.ffps);
+
+    m_dirty.clr(D3D9DeviceDirtyFlag::PushDataShared,
+                D3D9DeviceDirtyFlag::PushDataVs,
+                D3D9DeviceDirtyFlag::PushDataFfvs,
+                D3D9DeviceDirtyFlag::PushDataFfps);
   }
 
 
@@ -7443,7 +7355,9 @@ namespace dxvk {
     if (unlikely(UploadIBO && ibo != nullptr && ibo->NeedsUpload()))
       FlushBuffer(ibo);
 
-    UpdateFog();
+
+    if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Fog)))
+      UpdateFog();
 
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Framebuffer)))
       BindFramebuffer();
@@ -7610,6 +7524,12 @@ namespace dxvk {
       BindIndices();
       m_dirty.clr(D3D9DeviceDirtyFlag::IndexBuffer);
     }
+
+    if (m_dirty.any(D3D9DeviceDirtyFlag::PushDataShared,
+                    D3D9DeviceDirtyFlag::PushDataVs,
+                    D3D9DeviceDirtyFlag::PushDataFfvs,
+                    D3D9DeviceDirtyFlag::PushDataFfps))
+      UpdatePushData();
   }
 
 
@@ -8140,62 +8060,6 @@ namespace dxvk {
   }
 
 
-  D3D9FFShaderKeyVS D3D9DeviceEx::BuildFFKeyVS(D3D9FF_VertexBlendMode vertexBlendMode, bool indexedVertexBlend, uint32_t lightCount) const {
-    D3D9FFShaderKeyVS key;
-    key.Data.Contents.VertexHasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
-    key.Data.Contents.VertexHasColor0    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0);
-    key.Data.Contents.VertexHasColor1    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1);
-    key.Data.Contents.VertexHasPointSize = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize);
-    key.Data.Contents.VertexHasFog       = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog);
-
-    bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !key.Data.Contents.VertexHasPositionT;
-    bool colorVertex = m_state.renderStates[D3DRS_COLORVERTEX] != 0;
-    uint32_t mask    = (lighting && colorVertex)
-                     ? (key.Data.Contents.VertexHasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
-                     | (key.Data.Contents.VertexHasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
-                     : 0;
-
-    key.Data.Contents.UseLighting      = lighting;
-    key.Data.Contents.NormalizeNormals = m_state.renderStates[D3DRS_NORMALIZENORMALS];
-    key.Data.Contents.LocalViewer      = m_state.renderStates[D3DRS_LOCALVIEWER] && lighting;
-
-    key.Data.Contents.RangeFog         = m_state.renderStates[D3DRS_RANGEFOGENABLE];
-
-    key.Data.Contents.DiffuseSource    = m_state.renderStates[D3DRS_DIFFUSEMATERIALSOURCE]  & mask;
-    key.Data.Contents.AmbientSource    = m_state.renderStates[D3DRS_AMBIENTMATERIALSOURCE]  & mask;
-    key.Data.Contents.SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
-    key.Data.Contents.EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
-
-    key.Data.Contents.LightCount       = key.Data.Contents.UseLighting ? lightCount : 0;
-
-    for (uint32_t i = 0; i < caps::MaxTextureBlendStages; i++) {
-      uint32_t transformFlags = m_state.textureStages[i][DXVK_TSS_TEXTURETRANSFORMFLAGS] & ~(D3DTTFF_PROJECTED);
-      uint32_t index          = m_state.textureStages[i][DXVK_TSS_TEXCOORDINDEX];
-      uint32_t indexFlags     = (index & TCIMask) >> TCIOffset;
-
-      transformFlags &= 0b111;
-      index          &= 0b111;
-
-      key.Data.Contents.TransformFlags  |= transformFlags << (i * 3);
-      key.Data.Contents.TexcoordFlags   |= indexFlags     << (i * 3);
-      key.Data.Contents.TexcoordIndices |= index          << (i * 3);
-    }
-
-    key.Data.Contents.VertexTexcoordDeclMask = m_state.vertexDecl != nullptr ? m_state.vertexDecl->GetTexcoordMask() : 0;
-
-    key.Data.Contents.VertexBlendMode  = uint32_t(vertexBlendMode);
-
-    if (vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
-      key.Data.Contents.VertexBlendIndexed = indexedVertexBlend;
-      key.Data.Contents.VertexBlendCount   = m_state.renderStates[D3DRS_VERTEXBLEND] & 0xff;
-    }
-
-    key.Data.Contents.VertexClipping = m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
-
-    return key;
-  }
-
-
   void D3D9DeviceEx::UpdateFixedFunctionVS() {
     bool hasPositionT    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
     bool hasBlendWeight  = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasBlendWeight);
@@ -8291,7 +8155,58 @@ namespace dxvk {
 
       data->Material = m_state.material;
       data->TweenFactor = bit::cast<float>(m_state.renderStates[D3DRS_TWEENFACTOR]);
-      data->Key = BuildFFKeyVS(vertexBlendMode, indexedVertexBlend, lightIdx).Data;
+
+      bool vertexHasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
+      data->VertexHasPositionT = vertexHasPositionT;
+      data->VertexHasColor0    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor0);
+      data->VertexHasColor1    = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasColor1);
+      data->VertexHasPointSize = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPointSize);
+      data->VertexHasFog       = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasFog);
+
+      bool lighting    = m_state.renderStates[D3DRS_LIGHTING] != 0 && !vertexHasPositionT;
+      bool colorVertex = m_state.renderStates[D3DRS_COLORVERTEX] != 0;
+      uint32_t mask    = (lighting && colorVertex)
+                       ? (data->VertexHasColor0 ? D3DMCS_COLOR1 : D3DMCS_MATERIAL)
+                       | (data->VertexHasColor1 ? D3DMCS_COLOR2 : D3DMCS_MATERIAL)
+                       : 0;
+
+      data->UseLighting      = lighting;
+      data->NormalizeNormals = m_state.renderStates[D3DRS_NORMALIZENORMALS];
+      data->LocalViewer      = m_state.renderStates[D3DRS_LOCALVIEWER] && lighting;
+
+      data->RangeFog         = m_state.renderStates[D3DRS_RANGEFOGENABLE];
+
+      data->DiffuseSource    = m_state.renderStates[D3DRS_DIFFUSEMATERIALSOURCE]  & mask;
+      data->AmbientSource    = m_state.renderStates[D3DRS_AMBIENTMATERIALSOURCE]  & mask;
+      data->SpecularSource   = m_state.renderStates[D3DRS_SPECULARMATERIALSOURCE] & mask;
+      data->EmissiveSource   = m_state.renderStates[D3DRS_EMISSIVEMATERIALSOURCE] & mask;
+
+      uint32_t lightCount = lightIdx;
+      data->LightCount       = lighting ? lightCount : 0;
+
+      for (uint32_t i = 0; i < caps::MaxTextureBlendStages; i++) {
+        uint32_t transformFlags = m_state.textureStages[i][DXVK_TSS_TEXTURETRANSFORMFLAGS] & ~(D3DTTFF_PROJECTED);
+        uint32_t index          = m_state.textureStages[i][DXVK_TSS_TEXCOORDINDEX];
+        uint32_t indexFlags     = (index & TCIMask) >> TCIOffset;
+
+        transformFlags &= 0b111;
+        index          &= 0b111;
+
+        data->TexcoordTransformFlags[i]  = transformFlags;
+        data->TexcoordFlags[i]   = indexFlags;
+        data->TexcoordIndices[i] = index;
+      }
+
+      data->VertexTexcoordDeclMask = m_state.vertexDecl != nullptr ? m_state.vertexDecl->GetTexcoordMask() : 0;
+
+      data->VertexBlendMode = uint8_t(vertexBlendMode);
+
+      if (vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
+        data->VertexBlendIndexed = indexedVertexBlend;
+        data->VertexBlendCount   = m_state.renderStates[D3DRS_VERTEXBLEND] & 0xff;
+      }
+
+      data->VertexClipping = m_state.renderStates[D3DRS_CLIPPLANEENABLE] != 0;
     }
 
     if (m_dirty.test(D3D9DeviceDirtyFlag::FFVertexBlend) && vertexBlendMode == D3D9FF_VertexBlendMode_Normal) {
@@ -8624,13 +8539,13 @@ namespace dxvk {
     rs[D3DRS_ALPHAFUNC]           = D3DCMP_ALWAYS;
     BindAlphaTestState();
     rs[D3DRS_ALPHAREF]            = 0;
-    UpdatePushConstant<D3D9RenderStateItem::AlphaRef>();
+    m_pushData.shared.alphaRef    = rs[D3DRS_ALPHAREF];
 
     rs[D3DRS_MULTISAMPLEMASK]     = 0xffffffff;
     BindMultiSampleState();
 
     rs[D3DRS_TEXTUREFACTOR]       = 0xffffffff;
-    UpdatePushConstant<D3D9RenderStateItem::TextureFactor>();
+    m_pushData.ffps.textureFactor = rs[D3DRS_TEXTUREFACTOR];
 
     rs[D3DRS_DIFFUSEMATERIALSOURCE]  = D3DMCS_COLOR1;
     rs[D3DRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
@@ -8656,11 +8571,7 @@ namespace dxvk {
     rs[D3DRS_FOGEND]                     = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGDENSITY]                 = bit::cast<DWORD>(1.0f);
     rs[D3DRS_FOGVERTEXMODE]              = D3DFOG_NONE;
-    m_dirty.set(D3D9DeviceDirtyFlag::FogColor);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogDensity);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogEnd);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogScale);
-    m_dirty.set(D3D9DeviceDirtyFlag::FogState);
+    m_dirty.set(D3D9DeviceDirtyFlag::Fog);
 
     rs[D3DRS_CLIPPLANEENABLE] = 0;
     m_dirty.set(D3D9DeviceDirtyFlag::ClipPlanes);
@@ -8675,9 +8586,9 @@ namespace dxvk {
     rs[D3DRS_POINTSIZE]                  = bit::cast<DWORD>(1.0f);
     rs[D3DRS_POINTSIZE_MIN]              = m_isD3D8Compatible ? bit::cast<DWORD>(0.0f) : bit::cast<DWORD>(1.0f);
     rs[D3DRS_POINTSIZE_MAX]              = bit::cast<DWORD>(limits.pointSizeRange[1]);
-    UpdatePushConstant<D3D9RenderStateItem::PointSize>();
-    UpdatePushConstant<D3D9RenderStateItem::PointSizeMin>();
-    UpdatePushConstant<D3D9RenderStateItem::PointSizeMax>();
+    m_pushData.vs.pointSize = EncodePointSize(rs[D3DRS_POINTSIZE]);
+    m_pushData.vs.pointSizeMin = EncodePointSize(rs[D3DRS_POINTSIZE_MIN]);
+    m_pushData.vs.pointSizeMax = EncodePointSize(rs[D3DRS_POINTSIZE_MAX]);
     m_dirty.set(D3D9DeviceDirtyFlag::PointScale);
     UpdatePointMode(false);
 
@@ -8826,6 +8737,12 @@ namespace dxvk {
     m_alphaTestEnabled = false;
     m_atocEnabled      = false;
     m_nvdbEnabled      = false;
+
+    // Update all push data
+    m_dirty.set(D3D9DeviceDirtyFlag::PushDataShared,
+                D3D9DeviceDirtyFlag::PushDataVs,
+                D3D9DeviceDirtyFlag::PushDataFfvs,
+                D3D9DeviceDirtyFlag::PushDataFfps);
   }
 
 
