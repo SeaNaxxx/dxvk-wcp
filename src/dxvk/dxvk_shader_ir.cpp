@@ -117,6 +117,9 @@ namespace dxvk {
           uint32_t                regIndex) {
       DxvkShaderBinding binding(m_stage, setIndexForType(type), regIndex);
 
+      if (regSpace == DxvkIrShader::SpecDataSet)
+        binding = DxvkShaderBinding(m_stage, regSpace, regIndex);
+
       if (m_bindings) {
         auto dstBinding = m_bindings->mapBinding(binding);
 
@@ -193,6 +196,7 @@ namespace dxvk {
      */
     void run() {
       gatherAliasedResourceBindings();
+      removeUnusedPushDataDwords();
 
       auto iter = m_builder.begin();
 
@@ -807,6 +811,9 @@ namespace dxvk {
       // Add debug names for sampler indices
       for (const auto& e : m_samplers)
         addDebugMemberName(def, e.samplerIndex, getDebugName(e.sampler));
+
+      if (wordCount & 1u)
+        addDebugMemberName(def, wordCount, "sPad");
 
       return def;
     }
@@ -1516,6 +1523,92 @@ namespace dxvk {
     }
 
 
+    void removeUnusedPushDataMembers(dxbc_spv::ir::SsaDef def) {
+      const auto& decl = m_builder.getOp(def);
+      const auto& type = decl.getType();
+
+      if (!type.isStructType())
+        return;
+
+      // Find the index of the highest accessed struct member
+      uint32_t maxAccessedMember = 0u;
+
+      small_vector<dxbc_spv::ir::SsaDef, 64u> uses;
+      m_builder.getUses(def, uses);
+
+      for (auto use : uses) {
+        const auto& useOp = m_builder.getOp(use);
+
+        if (useOp.getOpCode() == dxbc_spv::ir::OpCode::ePushDataLoad) {
+          const auto& addressOp = m_builder.getOpForOperand(useOp, 1u);
+          dxbc_spv_assert(addressOp.isConstant());
+
+          maxAccessedMember = std::max(maxAccessedMember,
+            uint32_t(addressOp.getOperand(0u)));
+        }
+      }
+
+      // Build new type, adding enough members to keep it aligned to a
+      // multiple of four bytes since we require dword alignment.
+      dxbc_spv::ir::Type newType;
+
+      for (uint32_t i = 0u; i < type.getStructMemberCount(); i++) {
+        if (i <= maxAccessedMember || (newType.byteSize() % 4u))
+          newType.addStructMember(type.getBaseType(i));
+      }
+
+      if (newType == decl.getType())
+        return;
+
+      for (auto use : uses) {
+        const auto& useOp = m_builder.getOp(use);
+
+        switch (useOp.getOpCode()) {
+          case dxbc_spv::ir::OpCode::ePushDataLoad: {
+            // If the new type is no longer a struct of multiple members,
+            // we have to remove the outer index from any loads.
+            if (!newType.isStructType()) {
+              const auto& addressOp = m_builder.getOpForOperand(useOp, 1u);
+              dxbc_spv_assert(addressOp.getOperandCount() <= 2u);
+
+              dxbc_spv::ir::SsaDef newAddress = (addressOp.getOperandCount() > 1u)
+                ? m_builder.makeConstant(uint32_t(addressOp.getOperand(1u)))
+                : dxbc_spv::ir::SsaDef();
+
+              m_builder.rewriteOp(use, dxbc_spv::ir::Op(useOp).setOperand(1u, newAddress));
+            }
+          } break;
+
+          case dxbc_spv::ir::OpCode::eDebugMemberName: {
+            // Remove any member debug names that are now out of bounds
+            if (uint32_t(useOp.getOperand(useOp.getFirstLiteralOperandIndex())) >= newType.getStructMemberCount())
+              m_builder.remove(use);
+          } break;
+
+          default:
+            break;
+        }
+      }
+
+      // Apply new type
+      m_builder.rewriteOp(def, dxbc_spv::ir::Op(decl).setType(std::move(newType)));
+    }
+
+
+    void removeUnusedPushDataDwords() {
+      small_vector<dxbc_spv::ir::SsaDef, 16u> pushData;
+
+      for (auto iter = m_builder.getDeclarations().first;
+                iter != m_builder.getDeclarations().second; iter++) {
+        if (iter->getOpCode() == dxbc_spv::ir::OpCode::eDclPushData)
+          pushData.push_back(iter->getDef());
+      }
+
+      for (auto e : pushData)
+        removeUnusedPushDataMembers(e);
+    }
+
+
     void addBinding(const DxvkBindingInfo& binding) {
       DxvkShaderDescriptor descriptor(binding, m_metadata.stage);
       m_layout.addBindings(1u, &descriptor);
@@ -1974,6 +2067,8 @@ namespace dxvk {
 
         if (m_metadata.stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
           ioPass.resolvePatchConstantLocations(convertIoMap(linkage->prevStageOutputs, linkage->prevStage));
+      } else if (m_metadata.stage != VK_SHADER_STAGE_COMPUTE_BIT) {
+        ioPass.lowerSpecConstantsToCbv(SpecDataSet, 0u);
       }
 
       if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT
@@ -2167,6 +2262,7 @@ namespace dxvk {
 
     m_metadata = lowerBindingModelPass.getMetadata();
     m_layout = lowerBindingModelPass.getLayout();
+    m_layout.addSpecDataBuffer(DxvkShaderBinding(m_metadata.stage, SpecDataSet, 0u));
 
     serializeIr(builder);
   }

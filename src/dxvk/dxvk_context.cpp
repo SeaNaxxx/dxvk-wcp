@@ -6024,7 +6024,8 @@ namespace dxvk {
         DxvkContextFlag::GpDirtyDepthBias,
         DxvkContextFlag::GpDirtyDepthBounds,
         DxvkContextFlag::GpDirtyDepthClip,
-        DxvkContextFlag::GpDirtyDepthTest);
+        DxvkContextFlag::GpDirtyDepthTest,
+        DxvkContextFlag::GpDirtySpecDataBlock);
 
       m_flags.clr(
         DxvkContextFlag::GpRenderPassSuspended,
@@ -6669,6 +6670,7 @@ namespace dxvk {
 
     m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS);
 
+    m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
     m_flags.clr(DxvkContextFlag::GpDirtyPipeline);
     return true;
   }
@@ -6690,11 +6692,11 @@ namespace dxvk {
                 DxvkContextFlag::GpDynamicSampleLocations,
                 DxvkContextFlag::GpHasPushData,
                 DxvkContextFlag::GpIndependentSets);
-    
+
     m_flags.set(m_state.gp.state.useDynamicBlendConstants()
       ? DxvkContextFlag::GpDynamicBlendConstants
       : DxvkContextFlag::GpDirtyBlendConstants);
-    
+
     m_flags.set((!m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard))
       ? DxvkContextFlags(DxvkContextFlag::GpDynamicRasterizerState,
                          DxvkContextFlag::GpDynamicDepthBias)
@@ -6762,14 +6764,17 @@ namespace dxvk {
                            DxvkContextFlag::GpDirtyStencilRef));
 
       m_flags.set(
-        DxvkContextFlag::GpDirtyMultisampleState);
+        DxvkContextFlag::GpDirtyMultisampleState,
+        DxvkContextFlag::GpDirtySpecDataBlock);
     }
 
     // If necessary, dirty descriptor sets due to layout incompatibilities
     auto newPipelineLayoutType = getActivePipelineLayoutType(VK_PIPELINE_BIND_POINT_GRAPHICS);
 
-    if (newPipelineLayoutType != oldPipelineLayoutType)
+    if (newPipelineLayoutType != oldPipelineLayoutType) {
       m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS);
+      m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
+    }
 
     // Also update push constant status when we know the final layout
     auto layout = m_state.gp.pipeline->getLayout()->getLayout(newPipelineLayoutType);
@@ -6788,6 +6793,9 @@ namespace dxvk {
 
     if (unlikely(m_features.test(DxvkContextFeature::DebugUtils))) {
       uint32_t color = getGraphicsPipelineDebugColor();
+
+      if (pipelineInfo.type == DxvkGraphicsPipelineType::BasePipeline)
+        color -= (color & 0xfcfcfcfcu) >> 2u;
 
       m_cmd->cmdInsertDebugUtilsLabel(DxvkCmdBuffer::ExecBuffer,
         vk::makeLabel(color, m_state.gp.pipeline->debugName()));
@@ -6851,7 +6859,8 @@ namespace dxvk {
 
     if (BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       m_flags.clr(DxvkContextFlag::GpDirtySpecConstants);
-      m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
+      m_flags.set(DxvkContextFlag::GpDirtyPipelineState,
+                  DxvkContextFlag::GpDirtySpecDataBlock);
     } else {
       m_flags.clr(DxvkContextFlag::CpDirtySpecConstants);
       m_flags.set(DxvkContextFlag::CpDirtyPipelineState);
@@ -6924,6 +6933,7 @@ namespace dxvk {
     // Find out which sets we actually need to update based on the pipeline
     // layout. This may be an empty mask if only unrelated resources were
     // changed, but we have no way of knowing that up-front.
+    uint32_t baseSetIndex = uint32_t(pipelineLayout->usesSamplerHeap());
     uint32_t dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
 
     if (likely(dirtySetMask)) {
@@ -7118,7 +7128,7 @@ namespace dxvk {
         VkBindDescriptorSetsInfo bindInfo = { VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO };
         bindInfo.stageFlags = pipelineLayout->getShaderStageMask();
         bindInfo.layout = pipelineLayout->getPipelineLayout();
-        bindInfo.firstSet = first + uint32_t(pipelineLayout->usesSamplerHeap());
+        bindInfo.firstSet = first + baseSetIndex;
         bindInfo.descriptorSetCount = count;
         bindInfo.pDescriptorSets = &sets[first];
 
@@ -7126,6 +7136,33 @@ namespace dxvk {
 
         dirtySetMask &= countMask;
       } while (dirtySetMask);
+    }
+
+    if (BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS
+     && unlikely(m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock))) {
+      VkDescriptorSet set = m_descriptorPool->alloc(m_trackingId, m_device->getSpecDataSetLayout());
+
+      VkWriteDescriptorSetInlineUniformBlock blockInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK };
+      blockInfo.dataSize = sizeof(DxvkScInfo);
+      blockInfo.pData = m_state.gp.state.sc.specConstants;
+
+      VkWriteDescriptorSet writeInfo = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &blockInfo };
+      writeInfo.dstSet = set;
+      writeInfo.descriptorCount = blockInfo.dataSize;
+      writeInfo.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+
+      m_cmd->updateDescriptorSets(1u, &writeInfo);
+
+      VkBindDescriptorSetsInfo bindInfo = { VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO };
+      bindInfo.stageFlags = pipelineLayout->getShaderStageMask();
+      bindInfo.layout = pipelineLayout->getPipelineLayout();
+      bindInfo.firstSet = baseSetIndex + DxvkDescriptorSets::GpIndependentSetCount;
+      bindInfo.descriptorSetCount = 1u;
+      bindInfo.pDescriptorSets = &set;
+
+      m_cmd->cmdBindDescriptorSets(DxvkCmdBuffer::ExecBuffer, &bindInfo);
+
+      m_flags.clr(DxvkContextFlag::GpDirtySpecDataBlock);
     }
   }
 
@@ -7138,11 +7175,15 @@ namespace dxvk {
     DxvkPipelineLayoutType pipelineLayoutType = getActivePipelineLayoutType(BindPoint);
     const auto* pipelineLayout = layout->getLayout(pipelineLayoutType);
 
+    // Check whether we need to update the embedded spec data block
+    bool updateSpecData = BindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS
+      && m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock);
+
     // Check if there's anything to do; the mask can be empty
     // in case only unrelated bindings have been updated.
     uint32_t dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
 
-    if (unlikely(!dirtySetMask))
+    if (unlikely(!dirtySetMask && !updateSpecData))
       return true;
 
     // Make sure we have enough space for the set. If this fails, the caller
@@ -7151,6 +7192,7 @@ namespace dxvk {
     // need to re-allocate all sets too.
     if (!m_cmd->canAllocateDescriptors(pipelineLayout)) {
       m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT);
+      m_flags.set(DxvkContextFlag::GpDirtySpecDataBlock);
 
       if (!m_cmd->createDescriptorRange())
         return false;
@@ -7163,8 +7205,8 @@ namespace dxvk {
       dirtySetMask = layout->getDirtySetMask(pipelineLayoutType, m_descriptorState);
     }
 
-    std::array<uint32_t, DxvkDescriptorSets::SetCount> bufferIndices = { };
-    std::array<HeapOffset, DxvkDescriptorSets::SetCount> heapOffsets = { };
+    std::array<uint32_t, DxvkDescriptorSets::SetCount + 1u> bufferIndices = { };
+    std::array<HeapOffset, DxvkDescriptorSets::SetCount + 1u> heapOffsets = { };
 
     if constexpr (Model == DxvkBindingModel::DescriptorHeap) {
       // Make sure the heaps are actually valid and usable
@@ -7279,6 +7321,21 @@ namespace dxvk {
           }
         }
       }
+    }
+
+    if (unlikely(updateSpecData)) {
+      // Write current specialization consatnts directly into the descriptor heap
+      auto storage = m_cmd->allocateSpecData(pipelineLayout);
+      pipelineLayout->writeSpecData(storage.mapPtr, m_state.gp.state.sc.specConstants);
+
+      // Make sure that the descriptor offset gets updated properly. This uses the
+      // raw byte offset on the heap path, so don't apply the offset shift here.
+      uint32_t setIndex = DxvkDescriptorSets::GpIndependentSetCount;
+      heapOffsets[setIndex] = storage.offset;
+
+      dirtySetMask |= 1u << setIndex;
+
+      m_flags.clr(DxvkContextFlag::GpDirtySpecDataBlock);
     }
 
     do {
@@ -7831,8 +7888,8 @@ namespace dxvk {
       m_cmd->cmdSetBlendConstants(&m_state.dyn.blendConstants.r);
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyRasterizerState,
-                    DxvkContextFlag::GpDynamicRasterizerState)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyRasterizerState,
+                             DxvkContextFlag::GpDynamicRasterizerState))) {
       m_flags.clr(DxvkContextFlag::GpDirtyRasterizerState);
 
       m_cmd->cmdSetRasterizerState(
@@ -7867,8 +7924,8 @@ namespace dxvk {
       }
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyStencilTest,
-                    DxvkContextFlag::GpDynamicStencilTest)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyStencilTest,
+                             DxvkContextFlag::GpDynamicStencilTest))) {
       m_flags.clr(DxvkContextFlag::GpDirtyStencilTest);
 
       if (m_state.dyn.depthStencilState.stencilTest()) {
@@ -7904,16 +7961,16 @@ namespace dxvk {
       }
     }
 
-    if (m_flags.all(DxvkContextFlag::GpDirtyStencilRef,
-                    DxvkContextFlag::GpDynamicStencilTest)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyStencilRef,
+                             DxvkContextFlag::GpDynamicStencilTest))) {
       m_flags.clr(DxvkContextFlag::GpDirtyStencilRef);
 
       m_cmd->cmdSetStencilReference(VK_STENCIL_FRONT_AND_BACK,
         m_state.dyn.stencilReference);
     }
     
-    if (m_flags.all(DxvkContextFlag::GpDirtyDepthBias,
-                    DxvkContextFlag::GpDynamicDepthBias)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyDepthBias,
+                             DxvkContextFlag::GpDynamicDepthBias))) {
       m_flags.clr(DxvkContextFlag::GpDirtyDepthBias);
 
       if (m_device->features().extDepthBiasControl.depthBiasControl) {
@@ -7936,8 +7993,8 @@ namespace dxvk {
       }
     }
     
-    if (m_flags.all(DxvkContextFlag::GpDirtyDepthBounds,
-                    DxvkContextFlag::GpDynamicDepthBounds)) {
+    if (unlikely(m_flags.all(DxvkContextFlag::GpDirtyDepthBounds,
+                             DxvkContextFlag::GpDynamicDepthBounds))) {
       m_flags.clr(DxvkContextFlag::GpDirtyDepthBounds);
 
       m_cmd->cmdSetDepthBounds(
@@ -7977,48 +8034,12 @@ namespace dxvk {
     pushInfo.data.address = &m_state.pc.resourceData[pushData.getOffset()];
     pushInfo.data.size = pushData.getSize();
 
-    if ((bit::tzcnt(pushData.getResourceDwordMask() + 1u) * 4u) < pushData.getSize()) {
+    if (layout->needsPushDataGather()) {
       pushInfo.data.address = &localData[pushData.getOffset()];
 
-      for (auto i : bit::BitMask(layout->getPushDataMask())) {
-        auto block = layout->getPushDataBlock(i);
-        auto blockSize = block.getSize();
-
-        auto srcOffset = DxvkPushDataBlock::computeBlockOffsetForIndex(i);
-        auto dstOffset = block.getOffset();
-
-        auto constantData = &m_state.pc.constantData[srcOffset];
-        auto resourceData = &m_state.pc.resourceData[dstOffset];
-
-        auto dstData = &localData[dstOffset];
-
-        uint32_t rangeOffset = 0u;
-
-        // Copy chunks of dwords either from the constant data array or
-        // the resource data array, depending on the resource mask.
-        uint64_t resourceMask = block.getResourceDwordMask();
-
-        while (resourceMask) {
-          uint32_t dwordIndex = bit::tzcnt(resourceMask);
-          uint32_t dwordCount = bit::tzcnt(resourceMask + (resourceMask & -resourceMask));
-
-          uint32_t byteIndex = dwordIndex * sizeof(uint32_t);
-          uint32_t byteCount = dwordCount * sizeof(uint32_t);
-
-          std::memcpy(&dstData[rangeOffset],
-            &constantData[rangeOffset], byteIndex);
-
-          std::memcpy(&dstData[rangeOffset + byteIndex],
-            &resourceData[rangeOffset + byteIndex],
-            byteCount - byteIndex);
-
-          resourceMask >>= dwordCount;
-          rangeOffset += byteCount;
-        }
-
-        std::memcpy(&dstData[rangeOffset],
-          &constantData[rangeOffset], blockSize - rangeOffset);
-      }
+      layout->gatherPushData(localData.data(),
+        m_state.pc.constantData.data(),
+        m_state.pc.resourceData.data());
     }
 
     if (m_features.test(DxvkContextFeature::DescriptorHeap)) {
@@ -8227,7 +8248,8 @@ namespace dxvk {
         return false;
     }
     
-    if (m_descriptorState.hasDirtyResources(VK_SHADER_STAGE_ALL_GRAPHICS)) {
+    if (m_descriptorState.hasDirtyResources(VK_SHADER_STAGE_ALL_GRAPHICS)
+     || unlikely(m_flags.all(DxvkContextFlag::GpIndependentSets, DxvkContextFlag::GpDirtySpecDataBlock))) {
       if (unlikely(!this->updateGraphicsShaderResources())) {
         // This can only happen if we were inside a secondary command buffer.
         // Technically it would be sufficient to only restart the secondary

@@ -1393,6 +1393,16 @@ namespace dxvk {
     }
 
     /**
+     * \brief Queries size of specialization constant fallback data
+     *
+     * Only relevant for layouts used with fast-linked pipelines.
+     * \returns Size of specialization constant data block, in bytes
+     */
+    VkDeviceSize getSpecDataMemorySize() const {
+      return m_heap.specDataSize;
+    }
+
+    /**
      * \brief Queries non-empty push data block mask
      */
     uint32_t getPushDataMask() const {
@@ -1431,6 +1441,37 @@ namespace dxvk {
       return result;
     }
 
+    /**
+     * \brief Helper to write spec constant data to the heap
+     *
+     * \param [in] dst Pointer to allocated heap memory
+     * \param [in] data Specialization constant data
+     */
+    void writeSpecData(void* dst, const uint32_t* data) const;
+
+    /**
+     * \brief Checks whether complex push data copies are required
+     *
+     * If all push data is sourced from resource data, the complex
+     * gather step can be skipped, otherwise it is required.
+     * \returns \c true if push the data layout requires gather.
+     */
+    bool needsPushDataGather() const {
+      return m_pushData.needsGather;
+    }
+
+    /**
+     * \brief Helper to gather and compact push data
+     *
+     * Takes base pointers to per-stage data and resource data and writes
+     * them to a packed byte array as defined by the layout's merged push
+     * data block. Push data is copied at dword granularity.
+     * \param [in] dst Destination pointer
+     * \param [in] srcData Pointer to per-stage data
+     * \param [in] srcResources Pointer to resource data
+     */
+    void gatherPushData(void* dst, const void* srcData, const void* srcResources) const;
+
   private:
 
     DxvkDevice*             m_device;
@@ -1441,6 +1482,13 @@ namespace dxvk {
 
     std::array<const DxvkDescriptorSetLayout*, DxvkPipelineLayoutKey::MaxSets> m_setLayouts = { };
 
+    struct PushDataCopy {
+      bool    isResource      = false;
+      uint8_t srcDwordOffset  = 0u;
+      uint8_t dstDwordOffset  = 0u;
+      uint8_t dwordCount      = 0u;
+    };
+
     struct {
       VkPipelineLayout  layout = VK_NULL_HANDLE;
     } m_legacy;
@@ -1449,17 +1497,24 @@ namespace dxvk {
       DxvkPushDataBlock mergedBlock = { };
       uint32_t          blockMask   = 0u;
       std::array<DxvkPushDataBlock, DxvkPushDataBlock::MaxBlockCount> blocks = { };
+
+      small_vector<PushDataCopy, 8u> copies;
+      bool              needsGather = false;
     } m_pushData;
 
     struct {
       uint32_t          offsetShift   = 0u;
       VkDeviceSize      setMemorySize = 0u;
+      VkDeviceSize      specDataSize  = 0u;
+      VkDeviceSize      specDataOffset = 0u;
     } m_heap;
 
     struct {
       std::vector<VkDescriptorMappingSourcePushIndexEXT>  pushIndex;
       std::vector<VkDescriptorSetAndBindingMappingEXT>    mappings;
     } m_mapping;
+
+    std::pair<VkDeviceSize, VkDeviceSize> computeSpecDataSetLayout();
 
     void initMetadata(
       const DxvkPipelineLayoutKey&      key);
@@ -1469,6 +1524,10 @@ namespace dxvk {
 
     void initMappings(
       const DxvkPipelineLayoutKey&      key);
+
+    void initPushDataCopy();
+
+    void addPushDataCopyEntry(const PushDataCopy& e);
 
   };
 
@@ -1698,6 +1757,24 @@ namespace dxvk {
     }
 
     /**
+     * \brief Queries number of spec data buffer bindings
+     * \returns Spec data buffer binding count
+     */
+    uint32_t getSpecDataBindingCount() const {
+      return m_specDataBuffers.size();
+    }
+
+    /**
+     * \brief Queries spec data buffer binding info
+     *
+     * \param [in] index Spec data buffer binding index
+     * \returns Set and binding for a given shader stage
+     */
+    DxvkShaderBinding getSpecDataBinding(uint32_t index) const {
+      return m_specDataBuffers[index];
+    }
+
+    /**
      * \brief Adds push data block
      * \param [in] range Push data block
      */
@@ -1726,6 +1803,16 @@ namespace dxvk {
       const DxvkShaderBinding&        binding);
 
     /**
+     * \brief Adds specialization data buffer declaration
+     *
+     * For linked pipelines, this buffer will be mapped to
+     * an inline uniform buffer managed by the backend.
+     * This buffer must not appear in optimized pipelines.
+     */
+    void addSpecDataBuffer(
+      const DxvkShaderBinding&        binding);
+
+    /**
      * \brief Merges another layout
      *
      * Adds push constants and bindings from the given
@@ -1744,6 +1831,7 @@ namespace dxvk {
 
     small_vector<DxvkShaderDescriptor, 32u> m_bindings;
     small_vector<DxvkShaderBinding, 4u> m_samplerHeaps;
+    small_vector<DxvkShaderBinding, 4u> m_specDataBuffers;
 
   };
 
