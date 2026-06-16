@@ -3013,41 +3013,39 @@ namespace dxvk {
     if (unlikely(!PrimitiveCount))
       return D3D_OK;
 
-    bool dynamicSysmemVBOs;
+    bool dynamicSysmemVBOs = false;
+
     uint32_t firstIndex     = 0;
     int32_t baseVertexIndex = 0;
     uint32_t vertexCount    = GetVertexCount(PrimitiveType, PrimitiveCount);
-    UploadPerDrawData(
-      StartVertex,
-      vertexCount,
-      firstIndex,
-      0,
-      baseVertexIndex,
-      &dynamicSysmemVBOs,
-      nullptr
-    );
+
+    UploadPerDrawData(StartVertex, vertexCount, firstIndex, 0,
+      baseVertexIndex, &dynamicSysmemVBOs, nullptr);
 
     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, false);
 
-    EmitCs([this,
-      cPrimType    = PrimitiveType,
-      cPrimCount   = PrimitiveCount,
-      cStartVertex = StartVertex
-    ](DxvkContext* ctx) {
-      uint32_t vertexCount = GetVertexCount(cPrimType, cPrimCount);
+    // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
+    VkDrawIndirectCommand draw = {};
+    draw.vertexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
+    draw.instanceCount = 1u;
+    draw.firstVertex = StartVertex;
 
-      ApplyPrimitiveType(ctx, cPrimType);
+    // Batch draws without state changes if possible
+    if (m_csDataType == D3D9CmdType::Draw) {
+      auto* drawArgs = m_csChunk->pushData(m_csData, 1u);
 
-      // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
+      if (likely(drawArgs)) {
+        new (drawArgs) VkDrawIndirectCommand(draw);
+        return D3D_OK;
+      }
+    }
 
-      VkDrawIndirectCommand draw = { };
-      draw.vertexCount   = vertexCount;
-      draw.instanceCount = 1u;
-      draw.firstVertex   = cStartVertex;
+    EmitCsCmd<VkDrawIndirectCommand>(D3D9CmdType::Draw, 1u,
+      [this] (DxvkContext* ctx, const VkDrawIndirectCommand* drawArgs, uint32_t drawCount) {
+        ctx->draw(drawCount, drawArgs);
+      });
 
-      ctx->draw(1u, &draw);
-    });
-
+    new (m_csData->first()) VkDrawIndirectCommand(draw);
     return D3D_OK;
   }
 
@@ -3067,41 +3065,50 @@ namespace dxvk {
     if (unlikely(!PrimitiveCount || !NumVertices))
       return D3D_OK;
 
-    bool dynamicSysmemVBOs;
-    bool dynamicSysmemIBO;
+    bool dynamicSysmemVBOs = false;
+    bool dynamicSysmemIBO = false;
+
     uint32_t indexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
-    UploadPerDrawData(
-      MinVertexIndex,
-      NumVertices,
-      StartIndex,
-      indexCount,
-      BaseVertexIndex,
-      &dynamicSysmemVBOs,
-      &dynamicSysmemIBO
-    );
+
+    UploadPerDrawData(MinVertexIndex, NumVertices, StartIndex, indexCount,
+      BaseVertexIndex, &dynamicSysmemVBOs, &dynamicSysmemIBO);
 
     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO);
 
-    EmitCs([this,
-      cPrimType        = PrimitiveType,
-      cPrimCount       = PrimitiveCount,
-      cStartIndex      = StartIndex,
-      cBaseVertexIndex = BaseVertexIndex,
-      cInstanceCount   = GetInstanceCount()
-    ](DxvkContext* ctx) {
-      auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
+    VkDrawIndexedIndirectCommand draw = {};
+    draw.indexCount = indexCount;
+    draw.instanceCount = GetInstanceCount();
+    draw.firstIndex = StartIndex;
+    draw.vertexOffset = BaseVertexIndex;
 
-      ApplyPrimitiveType(ctx, cPrimType);
+    // Batch draws without state changes if possible
+    if (m_csDataType == D3D9CmdType::DrawIndexed) {
+      auto* drawArgs = m_csChunk->pushData(m_csData, 1u);
 
-      VkDrawIndexedIndirectCommand draw = { };
-      draw.indexCount    = drawInfo.vertexCount;
-      draw.instanceCount = drawInfo.instanceCount;
-      draw.firstIndex    = cStartIndex;
-      draw.vertexOffset  = cBaseVertexIndex;
+      if (likely(drawArgs)) {
+        new (drawArgs) VkDrawIndexedIndirectCommand(draw);
+        return D3D_OK;
+      }
+    }
 
-      ctx->drawIndexed(1u, &draw);
+    EmitCsCmd<VkDrawIndexedIndirectCommand>(D3D9CmdType::DrawIndexed, 1u,
+      [this] (DxvkContext* ctx, VkDrawIndexedIndirectCommand* drawArgs, uint32_t drawCount) {
+      // If instancing is enabled for any vertex binding, but none of the instanced
+      // bindings are actually used, make sure to only draw a single instance anyway.
+      // If instancing is disabled, we don't need to do anything because any calls
+      // to GetInstanceCount will have returned 1 anyway.
+      // It is not possible for instancing state of any bindings to change without
+      // also issuing extra CS commands, so this is safe.
+      // TODO is this correct even with blending edge cases? This logic is old.
+      if (unlikely(m_iaState.streamsInstanced && !(m_iaState.streamsInstanced & m_iaState.streamsUsed))) {
+        for (uint32_t i = 0u; i < drawCount; i++)
+          drawArgs[i].instanceCount = 1u;
+      }
+
+      ctx->drawIndexed(drawCount, drawArgs);
     });
 
+    new (m_csData->first()) VkDrawIndexedIndirectCommand(draw);
     return D3D_OK;
   }
 
@@ -3138,8 +3145,6 @@ namespace dxvk {
       cStride       = VertexStreamZeroStride,
       cVertexCount  = vertexCount
     ](DxvkContext* ctx) mutable {
-      ApplyPrimitiveType(ctx, cPrimType);
-
       // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
       VkDrawIndirectCommand draw = { };
       draw.vertexCount = cVertexCount;
@@ -3206,8 +3211,6 @@ namespace dxvk {
                         static_cast<D3D9Format>(IndexDataFormat))
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
-
-      ApplyPrimitiveType(ctx, cPrimType);
 
       VkDrawIndexedIndirectCommand draw = { };
       draw.indexCount    = drawInfo.vertexCount;
@@ -3319,8 +3322,6 @@ namespace dxvk {
 
         Logger::warn("D3D9DeviceEx::ProcessVertices: instancing unsupported");
       }
-
-      ApplyPrimitiveType(ctx, D3DPT_POINTLIST);
 
       // We need to bind the buffer as a view rather than a raw buffer.
       // In order to avoid view bloat, create a format-less view for
@@ -5876,6 +5877,10 @@ namespace dxvk {
     // can processe them before the first use.
     m_initializer->FlushCsChunk();
 
+    // Reset last CS command since it is no longer safe to access
+    m_csDataType = D3D9CmdType::None;
+    m_csData = nullptr;
+
     // Constant buffers may hold a pointer into the current chunk,
     // reset that here so the data won't get overwritten.
     for (auto& cbv : m_constantBuffers)
@@ -7327,7 +7332,8 @@ namespace dxvk {
 
 
   uint32_t D3D9DeviceEx::GetInstanceCount() const {
-    return std::max(m_state.streamFreq[0] & 0x7FFFFFu, 1u);
+    uint32_t instanceCount = std::max(m_state.streamFreq[0] & 0x7FFFFFu, 1u);
+    return m_vbSlotTracking.instanced ? instanceCount : 1u;
   }
 
 
@@ -7538,6 +7544,8 @@ namespace dxvk {
                     D3D9DeviceDirtyFlag::PushDataFfvs,
                     D3D9DeviceDirtyFlag::PushDataFfps))
       UpdatePushData();
+
+    ApplyPrimitiveType(PrimitiveType);
   }
 
 
@@ -7651,7 +7659,7 @@ namespace dxvk {
         : GetFixedFunctionIsgn();
 
       auto elementCount = vertexElements.size();
-      auto elementData = EmitCsCmd<D3DVERTEXELEMENT9>(elementCount, [
+      auto elementData = EmitCsCmd<D3DVERTEXELEMENT9>(D3D9CmdType::None, elementCount, [
         &cIaState         = m_iaState,
         cInputSignature   = inputSignature,
         cStreamsInstanced = m_vbSlotTracking.instanced,
@@ -8393,14 +8401,20 @@ namespace dxvk {
   }
 
 
-  void D3D9DeviceEx::ApplyPrimitiveType(
-    DxvkContext*      pContext,
-    D3DPRIMITIVETYPE  PrimType) {
+  void D3D9DeviceEx::ApplyPrimitiveType(D3DPRIMITIVETYPE PrimType) {
+    // Special handling for ProcessVertices
+    if (unlikely(PrimType == D3DPT_FORCE_DWORD))
+      PrimType = D3DPT_POINTLIST;
+
     if (m_iaState.primitiveType != PrimType) {
       m_iaState.primitiveType = PrimType;
 
-      auto iaState = DecodeInputAssemblyState(PrimType);
-      pContext->setInputAssemblyState(iaState);
+      EmitCs([
+        cPrimType = PrimType
+      ] (DxvkContext* ctx) {
+        auto iaState = DecodeInputAssemblyState(cPrimType);
+        ctx->setInputAssemblyState(iaState);
+      });
     }
   }
 
