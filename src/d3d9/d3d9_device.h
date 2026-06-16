@@ -21,7 +21,6 @@
 #include "d3d9_fixed_function.h"
 #include "d3d9_swvp_emu.h"
 
-#include "d3d9_spec_constants.h"
 #include "d3d9_interop.h"
 #include "d3d9_on_12.h"
 
@@ -77,7 +76,6 @@ namespace dxvk {
     FFPixelShader,
     FFViewport,
     FFPixelData,
-    FFGlobalSpecular,
     SharedPixelShaderData,
     DepthBounds,
     PointScale,
@@ -997,8 +995,6 @@ namespace dxvk {
 
     void UpdateClipPlanes();
 
-    void UpdateGlobalSpecular();
-
     template<typename T>
     void UpdatePushDataBlock(const T& Block);
 
@@ -1444,17 +1440,9 @@ namespace dxvk {
 
     bool UseProgrammablePS();
 
-    uint32_t GetAlphaTestPrecision();
+    uint32_t GetAlphaTestPrecision(D3D9Surface* rt);
 
     void BindAlphaTestState();
-
-    void UpdateAlphaTestSpec(VkCompareOp alphaOp, uint32_t precision);
-    void UpdateVertexBoolSpec(uint32_t value);
-    void UpdatePixelBoolSpec(uint32_t value);
-    void UpdatePixelShaderSamplerSpec(uint32_t types, uint32_t fetch4);
-    void UpdateCommonSamplerSpec(uint32_t boundMask, uint32_t depthMask, uint32_t drefMask, uint32_t projections);
-    void UpdatePointModeSpec(uint32_t mode);
-    void UpdateFogModeSpec(bool fogEnabled, D3DFOGMODE vertexFogMode, D3DFOGMODE pixelFogMode);
 
     void BindSpecConstants();
 
@@ -1623,8 +1611,6 @@ namespace dxvk {
 
     D3D9VBSlotTracking              m_vbSlotTracking;
 
-    D3D9SpecializationInfo          m_specInfo = D3D9SpecializationInfo();
-
     bool                            m_isSWVP;
     bool                            m_isD3D8Compatible;
     bool                            m_ffZTest          = false;
@@ -1691,6 +1677,7 @@ namespace dxvk {
     // references objects that can call back into the device when freed.
     Direct3DState9                  m_state;
     D3D9PushData                    m_pushData = {};
+    D3D9SpecData                    m_specData = {};
 
     D3D9VkInteropDevice             m_d3d9Interop;
     D3D9ON12_ARGS                   m_d3d9On12Args = { };
