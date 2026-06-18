@@ -1337,6 +1337,10 @@ namespace dxvk {
     DxvkObjects*            m_common;
 
     uint64_t                m_trackingId = 0u;
+    uint64_t                m_submitWaitId = 0u;
+    uint64_t                m_submitLastId = 0u;
+    Rc<DxvkFence>           m_trackingFence;
+
     uint32_t                m_renderPassIndex = 0u;
     uint32_t                m_unsynchronizedDrawCount = 0u;
 
@@ -1947,6 +1951,7 @@ namespace dxvk {
     void prepareSharedImages();
 
     bool transitionImageLayout(
+            DxvkCmdBuffer             cmdBuffer,
             DxvkImage&                image,
       const VkImageSubresourceRange&  subresources,
             VkPipelineStageFlags2     srcStages,
@@ -2147,13 +2152,15 @@ namespace dxvk {
             size_t                    accessCount,
       const DxvkResourceAccess*       accessBatch);
 
-    bool prepareOutOfOrderTransfer(
+    DxvkCmdBuffer prepareOutOfOrderTransfer(
+            DxvkCmdBuffer             cmdBuffer,
             DxvkBuffer&               buffer,
             VkDeviceSize              offset,
             VkDeviceSize              size,
             DxvkAccess                access);
 
-    bool prepareOutOfOrderTransfer(
+    DxvkCmdBuffer prepareOutOfOrderTransfer(
+            DxvkCmdBuffer             cmdBuffer,
             DxvkImage&                image,
       const VkImageSubresourceRange&  subresources,
             bool                      discard,

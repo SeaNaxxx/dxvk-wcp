@@ -71,6 +71,9 @@ namespace dxvk {
     // Add a fast path to query debug utils support
     if (m_device->debugFlags().test(DxvkDebugFlag::Capture))
       m_features.set(DxvkContextFeature::DebugUtils);
+
+    // Create timeline semaphore for resource tracking IDs
+    m_trackingFence = m_device->createFence(DxvkFenceCreateInfo());
   }
   
   
@@ -136,6 +139,14 @@ namespace dxvk {
   void DxvkContext::flushCommandList(
     const VkDebugUtilsLabelEXT*       reason,
           DxvkSubmitStatus*           status) {
+    // If necessary, block any async queue on previous command completion
+    if (m_submitWaitId)
+      m_cmd->waitFence(m_trackingFence, std::exchange(m_submitWaitId, 0ull));
+
+    // Signal tracking timeline to current tracking ID
+    m_cmd->signalFence(m_trackingFence, m_trackingId);
+    m_submitLastId = m_trackingId;
+
     // Flush pending descriptor updates and assign the sync
     // point to the submission
     if (m_features.any(DxvkContextFeature::DescriptorHeap,
@@ -415,7 +426,11 @@ namespace dxvk {
     accessBatch.emplace_back(*dstBuffer, dstOffset, numBytes, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     accessBatch.emplace_back(*srcBuffer, srcOffset, numBytes, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 
-    DxvkCmdBuffer cmdBuffer = prepareOutOfOrderTransfer(DxvkCmdBuffer::InitBuffer, accessBatch.size(), accessBatch.data());
+    DxvkCmdBuffer cmdBuffer = (srcBuffer->memFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+      ? DxvkCmdBuffer::InitBuffer
+      : DxvkCmdBuffer::SdmaBuffer;
+
+    cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer, accessBatch.size(), accessBatch.data());
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
       this->endCurrentPass(true);
@@ -1193,7 +1208,7 @@ namespace dxvk {
 
     if (access.image && access.imageLayout != access.image->info().layout) {
       // External release barrier and layout transition in one go
-      transitionImageLayout(*access.image, access.imageSubresources,
+      transitionImageLayout(cmdBuffer, *access.image, access.imageSubresources,
         access.stages, access.access, access.imageLayout,
         access.image->info().stages, access.image->info().access, false);
       flushImageLayoutTransitions(cmdBuffer);
@@ -1387,7 +1402,7 @@ namespace dxvk {
     if (image->queryLayout(image->getAvailableSubresources()) != image->info().layout) {
       endCurrentPass(true);
 
-      transitionImageLayout(*image,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *image,
         image->getAvailableSubresources(),
         image->info().stages, image->info().access,
         image->info().layout, image->info().stages, image->info().access, false);
@@ -1406,7 +1421,7 @@ namespace dxvk {
 
     if (layout != image->info().layout) {
       if (layout == VK_IMAGE_LAYOUT_UNDEFINED || layout == VK_IMAGE_LAYOUT_PREINITIALIZED) {
-        transitionImageLayout(*image, image->getAvailableSubresources(),
+        transitionImageLayout(DxvkCmdBuffer::InitBuffer, *image, image->getAvailableSubresources(),
           image->info().stages, image->info().access, image->info().layout,
           image->info().stages, image->info().access, layout == VK_IMAGE_LAYOUT_UNDEFINED);
         flushImageLayoutTransitions(DxvkCmdBuffer::InitBarriers);
@@ -2388,7 +2403,7 @@ namespace dxvk {
         ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
         : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 
-      transitionImageLayout(*dstImage, dstSubresource,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, *dstImage, dstSubresource,
         dstImage->info().stages, dstImage->info().access, newLayout, stages, access,
         isFullWrite);
 
@@ -3538,7 +3553,12 @@ namespace dxvk {
     imageAccess.imageOffset = imageOffset;
     imageAccess.imageExtent = imageExtent;
 
-    DxvkCmdBuffer cmdBuffer = prepareOutOfOrderTransfer(DxvkCmdBuffer::InitBuffer,
+    // Try to perform image uploads on the async transfer queue
+    DxvkCmdBuffer cmdBuffer = (buffer->memFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+      ? DxvkCmdBuffer::InitBuffer
+      : DxvkCmdBuffer::SdmaBuffer;
+
+    cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
       accessBatch.size(), accessBatch.data());
 
     if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
@@ -9419,7 +9439,7 @@ namespace dxvk {
 
     if (likely(!keepAttachments || !overlapsRenderTarget(image, subresources))) {
       // Transition entire image to its default limit in one go
-      transitionImageLayout(image, subresources,
+      transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, subresources,
         image.info().stages, image.info().access, image.info().layout,
         image.info().stages, image.info().access, false);
       return true;
@@ -9445,14 +9465,14 @@ namespace dxvk {
               range.layerCount = 1u;
 
               if (!overlapsRenderTarget(image, range)) {
-                transitionImageLayout(image, range,
+                transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
                   image.info().stages, image.info().access, image.info().layout,
                   image.info().stages, image.info().access, false);
               }
             }
           } else {
             // Transition entire mip level at once
-            transitionImageLayout(image, range,
+            transitionImageLayout(DxvkCmdBuffer::ExecBuffer, image, range,
               image.info().stages, image.info().access, image.info().layout,
               image.info().stages, image.info().access, false);
           }
@@ -9539,6 +9559,7 @@ namespace dxvk {
 
 
   bool DxvkContext::transitionImageLayout(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkImage&                image,
     const VkImageSubresourceRange&  subresources,
           VkPipelineStageFlags2     srcStages,
@@ -9555,11 +9576,20 @@ namespace dxvk {
 
     VkImageLayout srcLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (!discard || !(image.info().usage & rtUsage))
+    // Always respect discard flag on SDMA queue since we won't
+    // issue any queue ownership transfers to that queue.
+    if (!discard || (!(image.info().usage & rtUsage) && cmdBuffer < DxvkCmdBuffer::SdmaBuffer))
       srcLayout = image.queryLayout(subresources);
 
     if (likely(srcLayout == dstLayout))
       return false;
+
+    // Just ensure that semaphore synchronization propagates
+    // properly and filter out bits unsupported on the queue
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBarriers) {
+      srcStages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+      srcAccess = VK_ACCESS_2_NONE;
+    }
 
     if (srcLayout == VK_IMAGE_LAYOUT_MAX_ENUM) {
       VkImageAspectFlags aspects = subresources.aspectMask;
@@ -9632,6 +9662,7 @@ namespace dxvk {
     // we can still try to move layout transitions that may be necessary to an
     // out-of-order command buffer in order to avoid additional barriers.
     bool promoteTransitions = m_imageLayoutTransitions.empty();
+    bool isSdma = cmdBuffer == DxvkCmdBuffer::SdmaBarriers;
 
     // Flush any barriers affecting the resources
     VkPipelineStageFlags2 srcStages = 0u;
@@ -9658,10 +9689,11 @@ namespace dxvk {
           }
         }
 
-        if (unlikely(e.stages & ~e.buffer->info().stages)
+        if (unlikely(isSdma)
+         || unlikely(e.stages & ~e.buffer->info().stages)
          || unlikely(e.access & ~e.buffer->info().access)) {
-          srcStages |= e.buffer->info().stages;
-          srcAccess |= e.buffer->info().access;
+          srcStages |= isSdma ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : e.buffer->info().stages;
+          srcAccess |= isSdma ? VK_ACCESS_2_NONE : e.buffer->info().access;
           dstStages |= e.stages;
           dstAccess |= e.access;
         }
@@ -9692,17 +9724,19 @@ namespace dxvk {
           }
         }
 
-        if (unlikely(e.stages & ~e.image->info().stages)
+        if (unlikely(isSdma)
+         || unlikely(e.stages & ~e.image->info().stages)
          || unlikely(e.access & ~e.image->info().access)) {
-          srcStages |= e.image->info().stages;
-          srcAccess |= e.image->info().access;
+          srcStages |= isSdma ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : e.image->info().stages;
+          srcAccess |= isSdma ? VK_ACCESS_2_NONE : e.image->info().access;
           dstStages |= e.stages;
           dstAccess |= e.access;
         }
 
         bool canPromote = !e.image->isTracked(m_trackingId, DxvkAccess::Write);
 
-        bool hasTransition = transitionImageLayout(*e.image, e.imageSubresources,
+        bool hasTransition = transitionImageLayout(cmdBuffer,
+          *e.image, e.imageSubresources,
           e.image->info().stages, e.image->info().access,
           e.imageLayout, e.stages, e.access, e.discard);
 
@@ -9735,26 +9769,39 @@ namespace dxvk {
           DxvkCmdBuffer             cmdBuffer,
           size_t                    count,
     const DxvkResourceAccess*       batch) {
-    for (size_t i = 0u; i < count; i++) {
-      const auto& e = batch[i];
+    if (likely(cmdBuffer < DxvkCmdBuffer::SdmaBuffer)) {
+      for (size_t i = 0u; i < count; i++) {
+        const auto& e = batch[i];
 
-      if (e.buffer) {
-        accessBuffer(cmdBuffer, *e.buffer, e.bufferOffset, e.bufferSize,
-          e.stages, e.access, e.buffer->info().stages, e.buffer->info().access,
-          DxvkAccessOp::None);
-      } else if (e.image) {
-        if (!e.imageExtent.width) {
-          accessImage(cmdBuffer, *e.image, e.imageSubresources,
-            e.imageLayout, e.stages, e.access, e.imageLayout,
-            e.image->info().stages, e.image->info().access,
+        if (e.buffer) {
+          accessBuffer(cmdBuffer, *e.buffer, e.bufferOffset, e.bufferSize,
+            e.stages, e.access, e.buffer->info().stages, e.buffer->info().access,
             DxvkAccessOp::None);
-        } else {
-          accessImageRegion(cmdBuffer, *e.image,
-            vk::pickSubresourceLayers(e.imageSubresources, 0u),
-            e.imageOffset, e.imageExtent, e.imageLayout,
-            e.stages, e.access, e.imageLayout,
-            e.image->info().stages, e.image->info().access,
-            DxvkAccessOp::None);
+        } else if (e.image) {
+          if (!e.imageExtent.width) {
+            accessImage(cmdBuffer, *e.image, e.imageSubresources,
+              e.imageLayout, e.stages, e.access, e.imageLayout,
+              e.image->info().stages, e.image->info().access,
+              DxvkAccessOp::None);
+          } else {
+            accessImageRegion(cmdBuffer, *e.image,
+              vk::pickSubresourceLayers(e.imageSubresources, 0u),
+              e.imageOffset, e.imageExtent, e.imageLayout,
+              e.stages, e.access, e.imageLayout,
+              e.image->info().stages, e.image->info().access,
+              DxvkAccessOp::None);
+          }
+        }
+      }
+    } else {
+      for (size_t i = 0u; i < count; i++) {
+        const auto& e = batch[i];
+
+        if (e.buffer) {
+          accessBufferTransfer(*e.buffer, e.stages, e.access);
+        } else if (e.image) {
+          accessImageTransfer(*e.image, e.imageSubresources,
+            e.imageLayout, e.stages, e.access);
         }
       }
     }
@@ -10368,50 +10415,72 @@ namespace dxvk {
         : DxvkAccess::Read;
 
       if (e.buffer) {
-        if (!prepareOutOfOrderTransfer(*e.buffer, e.bufferOffset, e.bufferSize, access))
-          return DxvkCmdBuffer::ExecBuffer;
+        cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
+          *e.buffer, e.bufferOffset, e.bufferSize, access);
       } else if (e.image) {
-        if (!prepareOutOfOrderTransfer(*e.image, e.imageSubresources, e.discard, access))
-          return DxvkCmdBuffer::ExecBuffer;
+        cmdBuffer = prepareOutOfOrderTransfer(cmdBuffer,
+          *e.image, e.imageSubresources, e.discard, access);
       }
+
+      if (cmdBuffer == DxvkCmdBuffer::ExecBuffer)
+        break;
     }
 
     return cmdBuffer;
   }
 
 
-  bool DxvkContext::prepareOutOfOrderTransfer(
+  DxvkCmdBuffer DxvkContext::prepareOutOfOrderTransfer(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkBuffer&               buffer,
           VkDeviceSize              offset,
           VkDeviceSize              size,
           DxvkAccess                access) {
     // Sparse resources can alias, need to ignore.
     if (unlikely(buffer.info().flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
-    // If the resource hasn't been used yet or both uses are reads,
-    // we can use this buffer in the init command buffer
-    if (!buffer.isTracked(m_trackingId, access))
-      return true;
+    // If the buffer hasn't been used in the previous submission, we're
+    // good. Force proper synchronization, but allow for some overlap.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer && buffer.getTrackId() < m_submitLastId) {
+      m_submitWaitId = std::max(m_submitWaitId, buffer.getTrackId());
+      return cmdBuffer;
+    }
 
-    // Otherwise, our only option is to discard. We can only do that if
-    // we're writing the full buffer. Therefore, the resource being read
-    // should always be checked first to avoid unnecessary discards.
-    if (access != DxvkAccess::Write || size < buffer.info().size || offset)
-      return false;
+    // Similarly, if we're reading from a buffer that cannot be written by the
+    // GPU, we can also safely perform the transfer op on any command buffer.
+    if (access == DxvkAccess::Read && !(buffer.info().access & vk::AccessWriteMask))
+      return cmdBuffer;
 
-    // Check if the buffer can actually be discarded at all.
-    if (!buffer.canRelocate())
-      return false;
+    // Otherwise, our only option is to discard, which we can only do if we're
+    // writing the full buffer. Therefore, the resource being read should always
+    // be checked first so that unnecessary discards are avoided.
+    bool canDiscard = access == DxvkAccess::Write && !offset
+      && size == buffer.info().size && buffer.canRelocate();
+
+    if (!canDiscard && cmdBuffer == DxvkCmdBuffer::SdmaBuffer)
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
+
+    // If the resource hasn't been used in the current command buffer yet or if
+    // both uses are reads, we can at least use this buffer in init commands
+    if (cmdBuffer < DxvkCmdBuffer::SdmaBuffer && !buffer.isTracked(m_trackingId, access))
+      return cmdBuffer;
+
+    // Buffer is in use, now we *really* need to discard
+    if (!canDiscard)
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Ignore large buffers to keep memory overhead in check. Use a higher
     // threshold when a render pass is active to avoid interrupting it.
-    VkDeviceSize threshold = !m_flags.test(DxvkContextFlag::GpRenderPassActive)
-      ? MaxDiscardSizeInRp
-      : MaxDiscardSize;
+    // Also ignore the limit on SDMA since making large uploads asynchronous
+    // should be highly beneficial.
+    if (cmdBuffer < DxvkCmdBuffer::SdmaBuffer) {
+      VkDeviceSize threshold = m_flags.test(DxvkContextFlag::GpRenderPassActive)
+        ? MaxDiscardSizeInRp : MaxDiscardSize;
 
-    if (size > threshold)
-      return false;
+      if (size > threshold)
+        return DxvkCmdBuffer::ExecBuffer;
+    }
 
     // If the buffer is used for transform feedback in any way, we have to stop
     // the render pass anyway, but we can at least avoid an extra barrier.
@@ -10425,23 +10494,24 @@ namespace dxvk {
 
     // Actually allocate and assign new backing storage
     this->invalidateBuffer(&buffer, buffer.allocateStorage());
-    return true;
+    return cmdBuffer;
   }
 
 
-  bool DxvkContext::prepareOutOfOrderTransfer(
+  DxvkCmdBuffer DxvkContext::prepareOutOfOrderTransfer(
+          DxvkCmdBuffer             cmdBuffer,
           DxvkImage&                image,
     const VkImageSubresourceRange&  subresources,
           bool                      discard,
           DxvkAccess                access) {
     // Sparse resources can alias, need to ignore.
     if (unlikely(image.info().flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Reject any images that use non-default image layouts since
     // per-subresource layout tracking relies on proper ordering
     if (unlikely(!image.hasUnifiedLayout()))
-      return false;
+      return DxvkCmdBuffer::ExecBuffer;
 
     // Ensure correct order of operations in case the image is a render
     // target and is either currently bound for rendering or has any
@@ -10449,12 +10519,37 @@ namespace dxvk {
     if (image.info().usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
       if (findOverlappingDeferredClear(image, subresources)
        || findOverlappingDeferredResolve(image, subresources))
-        return false;
+        return DxvkCmdBuffer::ExecBuffer;
 
       if (m_flags.test(DxvkContextFlag::GpRenderPassActive)) {
         if (isBoundAsRenderTarget(image, subresources))
-          return false;
+          return DxvkCmdBuffer::ExecBuffer;
       }
+    }
+
+    // Ignore images with more than one subresource since we'll
+    // usually see multiple uploads back to back
+    if (image.formatInfo()->aspectMask != VK_IMAGE_ASPECT_COLOR_BIT
+     || image.info().numLayers > 1u || image.info().mipLevels > 1u)
+      return DxvkCmdBuffer::ExecBuffer;
+
+    // For SDMA copies, we need to verify a few things to make sure that
+    // the image can actually be written on the transfer queue.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer) {
+      // We can't do anything clever w.r.t. ownership transfers, so only
+      // allow SDMA copies to happen if we discard the entire image.
+      if (discard && m_device->features().khrMaintenance11.maintenance11) {
+        // If the image hasn't been used in the previous submission, simply
+        // synchronize queues and perform the upload. Don't attempt to discard
+        // images because emitting the initial transition would get weird.
+        if (image.getTrackId() < m_submitLastId) {
+          m_submitWaitId = std::max(m_submitWaitId, image.getTrackId());
+          return cmdBuffer;
+        }
+      }
+
+      // Fall back to regular out-of-order command buffer
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
     }
 
     // If the image hasn't been used yet or all uses are reads,
@@ -10463,7 +10558,16 @@ namespace dxvk {
     if (discard)
       access = DxvkAccess::Write;
 
-    return !image.isTracked(m_trackingId, access);
+    if (image.isTracked(m_trackingId, access))
+      return DxvkCmdBuffer::ExecBuffer;
+
+    // Don't do asynchronous image copies for now. We would only be able
+    // to support this if the image consists of only one subresource and
+    // if we can discard it.
+    if (cmdBuffer == DxvkCmdBuffer::SdmaBuffer)
+      cmdBuffer = DxvkCmdBuffer::InitBuffer;
+
+    return cmdBuffer;
   }
 
 
