@@ -958,6 +958,8 @@ namespace dxvk {
 
     void UpdateFog();
 
+    std::pair<float, float> ComputeWNearFar() const;
+
     void BindFramebuffer();
 
     void BindViewportAndScissor();
@@ -1240,7 +1242,7 @@ namespace dxvk {
     }
 
     template<typename M, bool AllowFlush = true, typename Cmd>
-    M* EmitCsCmd(D3D9CmdType type, size_t count, Cmd&& command) {
+    DxvkCsDataBlock* EmitCsCmd(D3D9CmdType type, size_t count, Cmd&& command) {
       m_csDataType = type;
       m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
 
@@ -1256,7 +1258,7 @@ namespace dxvk {
         m_csData = m_csChunk->pushCmd<M, Cmd>(command, count);
       }
 
-      return reinterpret_cast<M*>(m_csData->first());
+      return m_csData;
     }
 
     void EmitCsChunk(DxvkCsChunkRef&& chunk);
