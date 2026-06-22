@@ -1753,6 +1753,9 @@ namespace dxvk {
         m_dirty.set(D3D9DeviceDirtyFlag::MultiSampleState);
         m_dirty.set(D3D9DeviceDirtyFlag::AlphaTestState);
       }
+
+      // FFPS may optimize out color ops if unused
+      m_dirty.set(D3D9DeviceDirtyFlag::FFPixelShader);
     }
 
     return D3D_OK;
@@ -7346,6 +7349,10 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::PrepareDraw(D3DPRIMITIVETYPE PrimitiveType, bool UploadVBOs, bool UploadIBO) {
+    // Need to update texture masks for FFPS early so that we properly track hazards
+    if (unlikely(!UseProgrammablePS()) && m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader))
+      UpdateFixedFunctionPS();
+
     if (unlikely(m_textureSlotTracking.unresolvableHazardRT != 0 || m_textureSlotTracking.unresolvableHazardDS != 0))
       EmitFeedbackLoopBarriers();
 
@@ -7374,7 +7381,6 @@ namespace dxvk {
     auto* ibo = GetCommonBuffer(m_state.indices);
     if (unlikely(UploadIBO && ibo != nullptr && ibo->NeedsUpload()))
       FlushBuffer(ibo);
-
 
     if (unlikely(m_dirty.test(D3D9DeviceDirtyFlag::Fog)))
       UpdateFog();
@@ -7441,9 +7447,6 @@ namespace dxvk {
 
       if (m_specData.setPsBoolConstants(boolConstants))
         m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
-    }
-    else if (m_dirty.test(D3D9DeviceDirtyFlag::FFPixelShader)) {
-      UpdateFixedFunctionPS();
     }
 
     uint32_t nullOrUnusedMask = ~usedSamplerMask | ~usedTextureMask;
@@ -8253,60 +8256,129 @@ namespace dxvk {
   }
 
 
+  uint32_t D3D9DeviceEx::GetTextureStageArgMask(
+          D3DTEXTUREOP          Op) {
+    switch (Op) {
+      // No args used
+      case D3DTOP_DISABLE:
+      case D3DTOP_BUMPENVMAP:
+      case D3DTOP_BUMPENVMAPLUMINANCE:
+        return 0b000u;
+
+      // Arg 1 only
+      case D3DTOP_SELECTARG1:
+      case D3DTOP_PREMODULATE:
+        return 0b010u;
+
+      // Arg 2 only
+      case D3DTOP_SELECTARG2:
+        return 0b100u;
+
+      // Arg 0, 1, 2
+      case D3DTOP_MULTIPLYADD:
+      case D3DTOP_LERP:
+        return 0b111u;
+
+      // Arg 1, 2
+      default:
+        return 0b110u;
+    }
+  }
+
+
+  D3D9TextureStageStateFlags D3D9DeviceEx::GetTextureStageStateFlags(
+          D3DTEXTUREOP          Op,
+          UINT                  Arg0,
+          UINT                  Arg1,
+          UINT                  Arg2,
+          bool                  Premodulate) {
+    uint32_t usedArgMask = GetTextureStageArgMask(Op);
+
+    // Some ops inherently sample the texture or use the current
+    // accumulator even if there is no explicit texture argument
+    D3D9TextureStageStateFlags result = {};
+
+    if (Op == D3DTOP_BLENDTEXTUREALPHA
+     || Op == D3DTOP_BLENDTEXTUREALPHAPM
+     || Op == D3DTOP_BUMPENVMAP
+     || Op == D3DTOP_BUMPENVMAPLUMINANCE)
+      result.set(D3D9TextureStageStateFlag::UsesTexture);
+
+    if (Op == D3DTOP_BLENDCURRENTALPHA)
+      result.set(D3D9TextureStageStateFlag::UsesCurrent);
+
+    // Check stage arguments actually used by the op
+    std::array<UINT, 3u> args = { Arg0, Arg1, Arg2 };
+
+    for (uint32_t i = 0u; i < args.size(); i++) {
+      if (usedArgMask & (1u << i)) {
+        // Strip modifiers from arguments.
+        auto arg = args[i] & D3DTA_SELECTMASK;
+
+        if (arg == D3DTA_TEXTURE)
+          result.set(D3D9TextureStageStateFlag::UsesTexture);
+        else if (arg == D3DTA_CURRENT)
+          result.set(D3D9TextureStageStateFlag::UsesCurrent);
+        else if (arg == D3DTA_TEMP)
+          result.set(D3D9TextureStageStateFlag::UsesTemp);
+      }
+    }
+
+    if (Premodulate && result.test(D3D9TextureStageStateFlag::UsesCurrent))
+      result.set(D3D9TextureStageStateFlag::UsesTexture);
+
+    return result;
+  }
+
+
   void D3D9DeviceEx::UpdateFixedFunctionPS() {
     // The flags are set based on the specialized shaders.
     m_dirty.clr(D3D9DeviceDirtyFlag::FFPixelShader);
-
-    // Used args for a given operation.
-    auto usesArg = [](DWORD op, uint32_t arg) {
-      switch (op) {
-        case D3DTOP_DISABLE:
-          return false; // No Args
-        case D3DTOP_SELECTARG1:
-        case D3DTOP_PREMODULATE:
-          return arg == 1u; // Arg 1
-        case D3DTOP_SELECTARG2:
-          return arg == 2u; // Arg 2
-        case D3DTOP_MULTIPLYADD:
-        case D3DTOP_LERP:
-          return true; // Arg 0, 1, 2
-        default:
-          return arg > 0u; // Arg 1, 2
-      }
-    };
 
     bool dirty = false;
 
     // Work out which stages are actually in use
     uint32_t activeTextureStageCount = 0u;
+    uint32_t preserveColorStageMask = 0u;
 
     for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
       auto& data = m_state.textureStages[i];
 
       // All subsequent stages are disabled too following the first disabled stage.
-      DWORD colorOp = data[DXVK_TSS_COLOROP];
+      auto colorOp = D3DTEXTUREOP(data[DXVK_TSS_COLOROP]);
+      auto alphaOp = D3DTEXTUREOP(data[DXVK_TSS_ALPHAOP]);
 
       if (colorOp == D3DTOP_DISABLE)
         break;
 
       // If the stage is invalid (ie. it's set to sample a texture and none is bound),
-      // this and all subsequent stages get disabled.
+      // this and all subsequent stages get disabled. Ignore D3DTOP_PREMODULATE here
+      // since it's not clear how that is supposed to behave; shader handles it.
       if (!m_state.textures[i]) {
-        // Strip modifiers from arguments.
-        // TODO fix this to take implicit sampling from certain ops as
-        // well as alpha into account, assuming that matches native.
-        uint32_t pureColorArg1 = data[DXVK_TSS_COLORARG1] & D3DTA_SELECTMASK;
-        uint32_t pureColorArg2 = data[DXVK_TSS_COLORARG2] & D3DTA_SELECTMASK;
-        uint32_t pureColorArg0 = data[DXVK_TSS_COLORARG0] & D3DTA_SELECTMASK;
+        D3D9TextureStageStateFlags flags = {};
+        flags.set(GetTextureStageStateFlags(colorOp, data[DXVK_TSS_COLORARG0], data[DXVK_TSS_COLORARG1], data[DXVK_TSS_COLORARG2], false));
+        flags.set(GetTextureStageStateFlags(alphaOp, data[DXVK_TSS_ALPHAARG0], data[DXVK_TSS_ALPHAARG1], data[DXVK_TSS_ALPHAARG2], false));
 
-        if ((pureColorArg0 == D3DTA_TEXTURE && usesArg(data[DXVK_TSS_COLOROP], 0u))
-         || (pureColorArg1 == D3DTA_TEXTURE && usesArg(data[DXVK_TSS_COLOROP], 1u))
-         || (pureColorArg2 == D3DTA_TEXTURE && usesArg(data[DXVK_TSS_COLOROP], 2u)))
+        if (flags.test(D3D9TextureStageStateFlag::UsesTexture))
           break;
       }
 
+      // Keep bump stages since they feed into texcoords for the next stage.
+      if (colorOp == D3DTOP_BUMPENVMAP || colorOp == D3DTOP_BUMPENVMAPLUMINANCE)
+        preserveColorStageMask |= 1u << i;
+
       activeTextureStageCount += 1u;
     }
+
+    // Track which textures are used to avoid unnecessary
+    // binding and unnecessary hazard checks.
+    bool hasColorRt = m_state.renderTargets[0u] && !m_state.renderTargets[0u]->IsNull();
+
+    uint32_t currTextures = 0u;
+    uint32_t tempTextures = 0u;
+
+    bool premodulateColor = false;
+    bool premodulateAlpha = false;
 
     for (uint32_t i = 0u; i < activeTextureStageCount; i++) {
       auto& data = m_state.textureStages[i];
@@ -8314,20 +8386,35 @@ namespace dxvk {
       DWORD resultArg = data[DXVK_TSS_RESULTARG];
       bool resultIsTemp = resultArg == D3DTA_TEMP;
 
-      DWORD colorOp = data[DXVK_TSS_COLOROP];
-      DWORD colorArg1 = data[DXVK_TSS_COLORARG1];
-      DWORD colorArg2 = data[DXVK_TSS_COLORARG2];
-      DWORD colorArg0 = data[DXVK_TSS_COLORARG0];
+      D3DTEXTUREOP colorOp = D3DTEXTUREOP(data[DXVK_TSS_COLOROP]);
+      D3DTEXTUREOP alphaOp = D3DTEXTUREOP(data[DXVK_TSS_ALPHAOP]);
 
-      DWORD alphaOp = data[DXVK_TSS_ALPHAOP];
-      DWORD alphaArg1 = data[DXVK_TSS_ALPHAARG1];
-      DWORD alphaArg2 = data[DXVK_TSS_ALPHAARG2];
-      DWORD alphaArg0 = data[DXVK_TSS_ALPHAARG0];
+      uint32_t colorArgMask = GetTextureStageArgMask(colorOp);
+      uint32_t alphaArgMask = GetTextureStageArgMask(alphaOp);
 
-      // TODO work out what this does and resolve in shader?
-      if (i == 0 && resultIsTemp && colorOp != D3DTOP_DISABLE && alphaOp == D3DTOP_DISABLE) {
+      DWORD colorArg0 = (colorArgMask & 0b001u) ? data[DXVK_TSS_COLORARG0] : 0u;
+      DWORD colorArg1 = (colorArgMask & 0b010u) ? data[DXVK_TSS_COLORARG1] : 0u;
+      DWORD colorArg2 = (colorArgMask & 0b100u) ? data[DXVK_TSS_COLORARG2] : 0u;
+
+      DWORD alphaArg0 = (alphaArgMask & 0b001u) ? data[DXVK_TSS_ALPHAARG0] : 0u;
+      DWORD alphaArg1 = (alphaArgMask & 0b010u) ? data[DXVK_TSS_ALPHAARG1] : 0u;
+      DWORD alphaArg2 = (alphaArgMask & 0b100u) ? data[DXVK_TSS_ALPHAARG2] : 0u;
+
+      // Initialize first alpha stage with diffuse alpha if left undefined.
+      if (!i && resultIsTemp && colorOp != D3DTOP_DISABLE && alphaOp == D3DTOP_DISABLE) {
         alphaOp   = D3DTOP_SELECTARG1;
+        alphaArg0 = 0u;
         alphaArg1 = D3DTA_DIFFUSE;
+        alphaArg2 = 0u;
+      }
+
+      // Discard color if we can. We will generally have to preserve alpha for alpha
+      // test, ATOC, etc. Pick the source in such a way that we don't use any VS inputs.
+      if (!hasColorRt && !(preserveColorStageMask & (1u << i))) {
+        colorOp = D3DTOP_SELECTARG1;
+        colorArg0 = 0u;
+        colorArg1 = D3DTA_TFACTOR;
+        colorArg2 = 0u;
       }
 
       // The last stage *always* writes to current.
@@ -8336,6 +8423,29 @@ namespace dxvk {
 
       dirty |= m_specData.setTextureStage(i, colorOp, alphaOp, resultArg,
         colorArg0, colorArg1, colorArg2, alphaArg0, alphaArg1, alphaArg2);
+
+      // Update texture masks
+      uint32_t stageTextures = 0u;
+
+      D3D9TextureStageStateFlags flags = {};
+      flags.set(GetTextureStageStateFlags(colorOp, colorArg0, colorArg1, colorArg2, premodulateColor));
+      flags.set(GetTextureStageStateFlags(alphaOp, alphaArg0, alphaArg1, alphaArg2, premodulateAlpha));
+
+      if (flags.test(D3D9TextureStageStateFlag::UsesTexture))
+        stageTextures |= 1u << i;
+      if (flags.test(D3D9TextureStageStateFlag::UsesCurrent))
+        stageTextures |= currTextures;
+      if (flags.test(D3D9TextureStageStateFlag::UsesTemp))
+        stageTextures |= tempTextures;
+
+      if (resultIsTemp)
+        tempTextures = stageTextures;
+      else
+        currTextures = stageTextures;
+
+      // Ensure subsequent stage gets bound for premodulate
+      premodulateColor = colorOp == D3DTOP_PREMODULATE;
+      premodulateAlpha = alphaOp == D3DTOP_PREMODULATE;
     }
 
     for (uint32_t i = activeTextureStageCount; i < caps::TextureStageCount; i++)
@@ -8343,6 +8453,16 @@ namespace dxvk {
 
     if (dirty)
       m_dirty.set(D3D9DeviceDirtyFlag::SpecializationEntries);
+
+    // Update actively used textures
+    auto prevTextures = m_textureSlotTracking.ffpsTextures;
+
+    if (prevTextures != currTextures) {
+      m_textureSlotTracking.ffpsTextures = currTextures;
+
+      UpdateActiveHazardsRT(prevTextures | currTextures);
+      UpdateActiveHazardsDS(prevTextures | currTextures);
+    }
   }
 
 
