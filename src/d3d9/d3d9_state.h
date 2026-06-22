@@ -404,9 +404,9 @@ namespace dxvk {
 
     D3D9ViewportInfo ViewportInfo;
 
-    Vector4 GlobalAmbient;
     std::array<D3D9Light, caps::MaxEnabledLights> Lights;
     D3DMATERIAL9 Material;
+    uint32_t GlobalAmbient;
     float TweenFactor;
 
     // Following part uses uint8 and bool so it's gonna be represented as uint32 in the shader and manually unpacked:
@@ -458,11 +458,11 @@ namespace dxvk {
 
   struct D3D9SharedPS {
     struct Stage {
-      float Constant[4];
+      uint32_t Constant;
+      uint32_t Padding;
       float BumpEnvMat[2][2];
       float BumpEnvLScale;
       float BumpEnvLOffset;
-      float Padding[2];
     } Stages[8];
   };
   

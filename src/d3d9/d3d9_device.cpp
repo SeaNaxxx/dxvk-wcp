@@ -7466,7 +7466,8 @@ namespace dxvk {
       auto data = GetConstantBuffer(CbvIndex::PSShared).AllocTyped<D3D9SharedPS>(1u);
 
       for (uint32_t i = 0; i < caps::TextureStageCount; i++) {
-        DecodeD3DCOLOR(D3DCOLOR(m_state.textureStages[i][DXVK_TSS_CONSTANT]), data->Stages[i].Constant);
+        data->Stages[i].Constant = m_state.textureStages[i][DXVK_TSS_CONSTANT];
+        data->Stages[i].Padding = 0u;
 
         // Flip major-ness so we can get away with a nice easy
         // dot in the shader without complex access
@@ -8161,8 +8162,6 @@ namespace dxvk {
 
       data->ViewportInfo = m_viewportInfo;
 
-      DecodeD3DCOLOR(m_state.renderStates[D3DRS_AMBIENT], data->GlobalAmbient.data);
-
       uint32_t lightIdx = 0;
 
       for (auto& light : m_state.lights) {
@@ -8181,6 +8180,7 @@ namespace dxvk {
       }
 
       data->Material = m_state.material;
+      data->GlobalAmbient = m_state.renderStates[D3DRS_AMBIENT];
       data->TweenFactor = bit::cast<float>(m_state.renderStates[D3DRS_TWEENFACTOR]);
 
       bool vertexHasPositionT = m_state.vertexDecl != nullptr && m_state.vertexDecl->TestFlag(D3D9VertexDeclFlag::HasPositionT);
